@@ -1,0 +1,157 @@
+# ═══════════════════════════════════════════════════════
+#  Guardian Ear — Centralized Configuration
+#  All hardcoded constants consolidated here.
+#  Loaded at runtime via src/utils/config_loader.py
+# ═══════════════════════════════════════════════════════
+
+# ─── Audio Processing ─────────────────────────────────
+audio:
+  sample_rate: 22050
+  duration: 3                   # seconds per clip
+  n_mels: 128                   # mel spectrogram bins
+  n_mfcc: 40                    # MFCC coefficients
+  n_chroma: 12                  # chroma pitch classes
+  fmax: 8000                    # max frequency for mel
+  target_time_steps: 130        # fixed time dimension after resize
+  feature_shape: [180, 130]     # (n_mels + n_mfcc + n_chroma, target_time_steps)
+
+# ─── Model Training ──────────────────────────────────
+model:
+  num_classes: 10
+  epochs: 50
+  batch_size: 32
+  learning_rate: 0.001
+  test_size: 0.30               # train/test split ratio
+  val_test_split: 0.50          # val/test within the test portion
+  random_state: 42
+  early_stopping_patience: 10
+  reduce_lr_patience: 5
+  reduce_lr_factor: 0.5
+  min_lr: 1.0e-6
+  paths:
+    best_model: "model/best_model.h5"
+    full_model: "model/guardian_ear_model.h5"
+    tflite_model: "model/guardian_ear.tflite"
+    class_info: "model/class_info.json"
+    x_min: "model/X_min.npy"
+    x_max: "model/X_max.npy"
+
+# ─── Threat Engine ────────────────────────────────────
+threat_engine:
+  threshold: 60                 # threat score threshold for raising alert
+  window_size: 600              # temporal analysis window in seconds (10 min)
+
+  # Formula weights (must sum to 1.0)
+  formula_weights:
+    confidence: 0.30            # alpha — model confidence
+    time: 0.20                  # beta  — time of day
+    location: 0.15              # gamma — location risk
+    sound: 0.15                 # delta — sound type risk
+    pattern: 0.20               # epsilon — temporal pattern
+
+  # Inherent risk weight per sound class (0.0–1.0)
+  sound_weights:
+    gun_shot: 1.00
+    siren: 0.85
+    jackhammer: 0.60
+    drilling: 0.55
+    car_horn: 0.50
+    engine_idling: 0.40
+    dog_bark: 0.20
+    children_playing: 0.15
+    street_music: 0.10
+    air_conditioner: 0.05
+
+  # Location sensitivity weights (0.0–1.0)
+  location_weights:
+    parking_lot: 1.00
+    hostel: 0.90
+    corridor: 0.85
+    entrance: 0.80
+    library: 0.70
+    classroom: 0.60
+    office: 0.55
+    cafeteria: 0.50
+    garden: 0.40
+    unknown: 0.50
+
+  # Seconds a sound must persist to be considered abnormal
+  duration_thresholds:
+    dog_bark: 180               # 3 minutes
+    engine_idling: 600          # 10 minutes
+    drilling: 900               # 15 minutes
+    children_playing: 1800      # 30 minutes
+    street_music: 600           # 10 minutes
+    air_conditioner: 1800       # 30 minutes
+    car_horn: 60                # 1 minute
+    siren: 120                  # 2 minutes
+    gun_shot: 0                 # instant alert
+    jackhammer: 300             # 5 minutes
+
+  # Detections in window before considered abnormal
+  repetition_thresholds:
+    dog_bark: 8
+    car_horn: 5
+    gun_shot: 2
+    siren: 3
+    children_playing: 20
+    drilling: 10
+    jackhammer: 8
+
+  # Dual-mode sound classification
+  alert_sounds:
+    - gun_shot
+    - siren
+    - jackhammer
+
+  assistive_sounds:
+    - dog_bark
+    - children_playing
+    - air_conditioner
+    - street_music
+    - engine_idling
+    - car_horn
+    - drilling
+
+# ─── Real-Time Inference ─────────────────────────────
+inference:
+  confidence_threshold: 0.70    # minimum confidence to process a detection
+  location: "parking_lot"       # default deployment location
+  buffer_size: 66150            # sample_rate * duration (22050 * 3)
+  step_seconds: 1.0             # overlap step size in seconds
+
+# ─── Priority-Based Action Engine ────────────────────
+action_engine:
+  emergency_contact: "+1-555-0199"
+  guardian_contact: "+1-555-0177"
+  enable_email_sim: true
+  enable_sms_sim: true
+  enable_call_sim: true
+  telegram_token: ""            # Optional Bot token for real-time mobile notifications
+  telegram_chat_id: ""          # Optional Chat ID for bot notifications
+  
+  # Action thresholds
+  water_flow_duration_limit: 10 # alert user if water flows for > 10 seconds
+  child_distress_repetition_limit: 3 # alert parent if child cries > 3 times
+
+# ─── File Paths ───────────────────────────────────────
+paths:
+  dataset: "dataset/UrbanSound8K/audio"
+  metadata: "dataset/UrbanSound8K/metadata/UrbanSound8K.csv"
+  features: "features"
+  model: "model"
+  alerts: "alerts"
+  logs: "logs"
+
+# ─── Class Names (ordered by classID 0–9) ────────────
+class_names:
+  - air_conditioner
+  - car_horn
+  - children_playing
+  - dog_bark
+  - drilling
+  - engine_idling
+  - gun_shot
+  - jackhammer
+  - siren
+  - street_music

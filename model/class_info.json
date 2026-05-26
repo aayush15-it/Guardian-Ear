@@ -1,0 +1,29 @@
+{
+  "class_names": [
+    "air_conditioner",
+    "car_horn",
+    "children_playing",
+    "dog_bark",
+    "drilling",
+    "engine_idling",
+    "gun_shot",
+    "jackhammer",
+    "siren",
+    "street_music"
+  ],
+  "num_classes": 10,
+  "alert_sounds": [
+    "gun_shot",
+    "siren",
+    "jackhammer"
+  ],
+  "assistive_sounds": [
+    "dog_bark",
+    "children_playing",
+    "air_conditioner",
+    "street_music",
+    "engine_idling",
+    "car_horn",
+    "drilling"
+  ]
+}

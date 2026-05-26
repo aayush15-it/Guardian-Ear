@@ -1,0 +1,43 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+guardian_env/
+venv/
+ENV/
+env/
+
+# IDE files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Testing & Cache
+.pytest_cache/
+.ipynb_checkpoints/
+.tmp/
+
+# Logs & Database Alerts
+logs/
+alerts/alert_log.csv
+*.log
+
+# Large Datasets & Model Weights
+dataset/
+features/
+# Exclude model weights to keep git push lightweight
+model/best_model.h5
+model/guardian_ear_model.h5
+model/guardian_ear.tflite
+model/X_min.npy
+model/X_max.npy
+
+# OS Files
+.DS_Store
+Thumbs.db

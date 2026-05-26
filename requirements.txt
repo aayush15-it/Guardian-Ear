@@ -1,0 +1,40 @@
+# ─────────────────────────────────────────────────
+# Guardian Ear — Production Dependencies
+# ─────────────────────────────────────────────────
+# Core ML
+tensorflow>=2.13.0,<2.17
+numpy>=1.24.0,<2.0
+scikit-learn>=1.3.0
+
+# Audio processing
+librosa>=0.10.1
+sounddevice>=0.4.6
+scipy>=1.11.0
+
+# Data
+pandas>=2.0.0
+h5py>=3.9.0
+
+# Visualization
+matplotlib>=3.7.0
+Pillow>=10.0.0
+
+# Dashboard
+streamlit>=1.28.0
+
+# API
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# Configuration
+PyYAML>=6.0
+
+# Model export & runtime optimization
+tf2onnx>=1.14.0
+onnxruntime>=1.15.0
+
+# Testing & Utilities
+pytest>=7.0.0
+tqdm>=4.66.0
+pydantic>=2.0.0
