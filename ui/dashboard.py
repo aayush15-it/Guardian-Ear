@@ -772,7 +772,7 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                         "Car Horn ℹ️": "car_horn"
                     }
                     mapped_class = sim_map[sim_sound]
-                    preds = np.zeros(10)
+                    preds = np.zeros(len(CLASS_NAMES))
                     if mapped_class in CLASS_NAMES:
                         mapped_idx = CLASS_NAMES.index(mapped_class)
                         preds[mapped_idx] = 0.99
@@ -784,28 +784,28 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                         preds[mapped_idx] = 0.99
                     
                     latest = {
-                        'class_name': mapped_class,
-                        'confidence': 0.99,
+                        'class_name': CLASS_NAMES[np.argmax(preds)],
+                        'confidence': np.max(preds),
                         'all_probs': preds,
-                        'mode': get_sound_mode(mapped_class) if mapped_class in CLASS_NAMES else 'ASSISTIVE',
+                        'mode': get_sound_mode(CLASS_NAMES[np.argmax(preds)]),
                         'timestamp': time.time(),
                         'alert': True
                     }
                     # Draw a nice simulated sine waveform for action feedback
-                    t_vals = np.linspace(0, 2, 2205)
-                    raw_audio = 0.15 * np.random.normal(0, 0.1, 2205) + 0.3 * np.sin(2 * np.pi * 120 * t_vals)
+                    t_vals = np.linspace(0, 2, 8820)
+                    raw_audio = 0.15 * np.random.normal(0, 0.1, 8820) + 0.3 * np.sin(2 * np.pi * 120 * t_vals)
                 else:
                     # Real detector data
                     if st.session_state.detector:
                         latest = st.session_state.detector.get_latest_prediction()
-                        raw_audio = st.session_state.detector.get_latest_audio_samples(44100)
+                        raw_audio = st.session_state.detector.get_latest_audio_samples(8820)
                     else:
                         latest = None
-                        raw_audio = np.zeros(44100)
+                        raw_audio = np.zeros(8820)
 
                 # 2. Render Live Waveform
                 wave_title.subheader("📈 Live Audio Stream")
-                downsampled = raw_audio[::15]  # Downsample for layout speed
+                downsampled = raw_audio[::40]  # Increased sample rate for better vis
                 wave_placeholder.line_chart(downsampled, height=140)
 
                 # 3. Process Prediction
@@ -813,6 +813,7 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                     c_name = latest['class_name']
                     conf = latest['confidence']
                     s_mode = latest['mode']
+                    conf_threshold_val = threshold / 100.0
                     
                     if c_name == 'silence':
                         threat_score = 0
@@ -839,17 +840,25 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                         )
                         threat_level = assessor.get_threat_level(threat_score)
                     
-                    # Decides and appends triggered priority actions
-                    if c_name != 'silence':
+                    # Only trigger priority actions for high-confidence detections
+                    if c_name != 'silence' and conf >= conf_threshold_val:
                         process_priority_actions(c_name, conf, threat_score, threat_level)
 
-                    # Update Metrics column
+                    # Update Metrics column — ALWAYS show even if below threshold
                     with cols_placeholder.container():
                         r1, r2, r3, r4 = st.columns(4)
                         r1.metric("Live Sound", display_name)
-                        r2.metric("Confidence", f"{conf * 100:.1f}%" if c_name != 'silence' else "100%")
+                        r2.metric("Confidence", f"{conf * 100:.1f}%" if c_name != 'silence' else "—")
                         r3.metric("Threat Score", f"{threat_score}/100")
                         r4.metric("Threat Level", threat_level)
+                        
+                        # Show info notice if below alert threshold (model IS working,
+                        # just not confident enough yet — reassure user)
+                        if c_name not in ('silence',) and conf < conf_threshold_val:
+                            st.info(
+                                f"ℹ️ Model detected **{display_name}** at **{conf*100:.1f}%** confidence "
+                                f"— below the **{threshold}%** alert threshold. Monitoring is active."
+                            )
 
                     # Update Status panel
                     with status_placeholder.container():
@@ -861,8 +870,8 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                             unsafe_allow_html=True,
                         )
                         
-                        # Display active alerts
-                        if threat_level != "SAFE":
+                        # Display active threat alerts only when above confidence threshold
+                        if threat_level != "SAFE" and conf >= conf_threshold_val:
                             st.markdown(
                                 f"<div class='alert-{threat_level.lower()}'>"
                                 f"<b>{threat_level} THREAT DETECTED</b><br>"
@@ -872,7 +881,7 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                             )
                 else:
                     with cols_placeholder.container():
-                        st.info("Calibrating live audio stream... Waiting for first inference chunk.")
+                        st.info("🎙️ Calibrating live audio stream... Waiting for first inference chunk (~3 seconds).")
 
                 # 4. Display Priority Action Engine Log
                 with actions_placeholder.container():

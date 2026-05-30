@@ -83,7 +83,12 @@ class RealTimeDetector:
         # Ring buffer: holds latest N seconds of audio
         buffer_seconds = max(self.duration * 2, 10)
         self._ring_buffer = deque(maxlen=self.sample_rate * buffer_seconds)
-        self._buffer_lock = threading.Lock()
+        self._buffer_lock = threading.Lock()   # guards _ring_buffer
+        self._pred_lock = threading.Lock()     # guards latest_prediction (separate to avoid contention)
+
+        # Silence threshold: deliberately low so microphone-captured system
+        # audio (played through speakers) is not incorrectly filtered as silence.
+        self.silence_rms_threshold: float = 0.001
 
         # Components
         self.extractor = AudioFeatureExtractor(cfg)
@@ -173,7 +178,7 @@ class RealTimeDetector:
 
     def get_latest_prediction(self) -> Optional[Dict[str, Any]]:
         """Thread-safe access to the latest inference result."""
-        with self._buffer_lock:
+        with self._pred_lock:
             return self.latest_prediction
 
     # ── Feature extraction + prediction ─────────────────────
@@ -218,10 +223,14 @@ class RealTimeDetector:
 
                 self._chunk_count += 1
 
-                # Check for silence (skip if RMS too low)
+                # Check for silence — deliberately low threshold (0.001) so that
+                # audio played through speakers and captured via microphone is not
+                # incorrectly silenced (system audio is quieter than direct load).
                 rms = np.sqrt(np.mean(audio ** 2))
-                if rms < 0.005:
-                    with self._buffer_lock:
+                logger.debug("Chunk #%d RMS=%.5f", self._chunk_count, rms)
+
+                if rms < self.silence_rms_threshold:
+                    with self._pred_lock:
                         self.latest_prediction = {
                             'class_name': 'silence',
                             'confidence': 1.0,
@@ -245,12 +254,16 @@ class RealTimeDetector:
                     )
                     self._display_result(class_name, confidence, all_probs, mode, alert)
                 else:
-                    logger.debug(
-                        "Chunk #%d: %s (%.1f%%) — below threshold",
+                    # Still log below-threshold detections at info level
+                    logger.info(
+                        "Chunk #%d: %s (%.1f%%) — below threshold (%.0f%%)",
                         self._chunk_count, class_name, confidence * 100,
+                        self.confidence_threshold * 100,
                     )
 
-                with self._buffer_lock:
+                # ALWAYS update latest_prediction so the dashboard always
+                # has fresh data to render, even for low-confidence results.
+                with self._pred_lock:
                     self.latest_prediction = {
                         'class_name': class_name,
                         'confidence': confidence,
