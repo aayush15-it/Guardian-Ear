@@ -26,10 +26,20 @@ import matplotlib.pyplot as plt
 
 warnings.filterwarnings('ignore')
 
-# ── Resolve project root ──
+# ── Resolve project root and ensure venv is in sys.path ────────────────────────
+# ROOT CAUSE FIX: When Streamlit launches without the virtual environment
+# activated (no 'activate' call), its subprocess may not include guardian_env
+# in sys.path. This causes 'import yaml' in config_loader.py to raise
+# ModuleNotFoundError which then surfaces as 'Could not open microphone'.
+# We self-heal by injecting BOTH the project root AND the venv site-packages.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
+
+# Inject venv site-packages so yaml/librosa/sounddevice are always importable
+_VENV_SITE_PACKAGES = _PROJECT_ROOT / 'guardian_env' / 'lib' / 'site-packages'
+if _VENV_SITE_PACKAGES.exists() and str(_VENV_SITE_PACKAGES) not in sys.path:
+    sys.path.insert(1, str(_VENV_SITE_PACKAGES))
 
 from src.threat_engine.rules import (
     ThreatAssessor, get_sound_mode, get_mode_description,
@@ -746,6 +756,7 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
             if st.session_state.detector is None:
                 with st.spinner("Initializing Audio Input..."):
                     try:
+                        import traceback as _tb
                         from src.utils.config_loader import load_config
                         cfg = load_config()
                         # Override default config options with live UI values
@@ -755,7 +766,22 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                         st.session_state.detector = RealTimeDetector(cfg, model=model)
                         st.session_state.detector.start()
                     except Exception as e:
-                        st.error(f"Could not open microphone: {e}. Running in simulation mode.")
+                        _full_tb = _tb.format_exc()
+                        # Log full traceback to console/log file for debugging
+                        import logging as _logging
+                        _logging.getLogger('GuardianEar.dashboard').error(
+                            'Live surveillance init failed:\n%s', _full_tb
+                        )
+                        # Show the REAL error (not a misleading 'microphone' message)
+                        st.error(
+                            f'**Live Surveillance startup failed.**\n\n'
+                            f'**Error:** `{type(e).__name__}: {e}`\n\n'
+                            f'**Full traceback** (expand to debug):\n```\n{_full_tb}\n```'
+                        )
+                        st.warning(
+                            'If you see **\'No module named yaml\'**, run: '
+                            '`guardian_env\\Scripts\\activate` then restart Streamlit.'
+                        )
                         st.session_state.detector = None
 
             # Rerun loop
@@ -944,6 +970,7 @@ def page_assistive_hearing_mode(model, location, threshold, X_min, X_max, sim_so
         if st.session_state.detector is None:
             with st.spinner("Initializing Audio Input..."):
                 try:
+                    import traceback as _tb
                     from src.utils.config_loader import load_config
                     cfg = load_config()
                     cfg['inference']['location'] = location
@@ -952,7 +979,20 @@ def page_assistive_hearing_mode(model, location, threshold, X_min, X_max, sim_so
                     st.session_state.detector = RealTimeDetector(cfg, model=model)
                     st.session_state.detector.start()
                 except Exception as e:
-                    st.error(f"Could not open microphone: {e}. Running in simulation mode.")
+                    _full_tb = _tb.format_exc()
+                    import logging as _logging
+                    _logging.getLogger('GuardianEar.dashboard').error(
+                        'Assistive stream init failed:\n%s', _full_tb
+                    )
+                    st.error(
+                        f'**Assistive Stream startup failed.**\n\n'
+                        f'**Error:** `{type(e).__name__}: {e}`\n\n'
+                        f'**Full traceback:**\n```\n{_full_tb}\n```'
+                    )
+                    st.warning(
+                        'If you see **\'No module named yaml\'**, run: '
+                        '`guardian_env\\Scripts\\activate` then restart Streamlit.'
+                    )
                     st.session_state.detector = None
 
         # Surveillance Loop

@@ -17,7 +17,18 @@ import functools
 from pathlib import Path
 from typing import Any, Dict
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError:
+    # Self-heal: Streamlit may run with a subprocess that excludes the venv
+    # from sys.path. Find guardian_env relative to this file and inject it.
+    import sys as _sys
+    from pathlib import Path as _Path
+    _project_root = _Path(__file__).resolve().parents[2]
+    _venv_site = _project_root / 'guardian_env' / 'lib' / 'site-packages'
+    if _venv_site.exists() and str(_venv_site) not in _sys.path:
+        _sys.path.insert(0, str(_venv_site))
+    import yaml  # retry after path fix — will raise if still missing
 
 from src.utils.logger import get_logger
 
