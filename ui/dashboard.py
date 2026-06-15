@@ -170,6 +170,15 @@ if 'detector' not in st.session_state:
     st.session_state.detector = None
 if 'triggered_actions' not in st.session_state:
     st.session_state.triggered_actions = []
+if 'session_start_time' not in st.session_state:
+    st.session_state.session_start_time = time.time()
+if 'session_detection_count' not in st.session_state:
+    st.session_state.session_detection_count = 0
+if 'session_peak_threat' not in st.session_state:
+    st.session_state.session_peak_threat = 0
+if 'telegram_test_status' not in st.session_state:
+    st.session_state.telegram_test_status = None
+
 
 
 # ─────────────────────────────────────────────────
@@ -233,22 +242,29 @@ def send_telegram_alert(token: str, chat_id: str, message: str) -> bool:
 
 def process_priority_actions(sound_class: str, confidence: float, threat_score: float, threat_level: str) -> Optional[Dict[str, Any]]:
     """
-    Decides and triggers simulated emergency response actions based on threat priorities.
+    Decides and triggers emergency response actions based on threat priority tiers.
+
     Tiers:
-      - TIER 1 (Safe/Ambient): air_conditioner, street_music. Action: None (ambient log).
-      - TIER 2 (Low Alert): dog_bark, engine_idling. Action: Dashboard Notification.
-      - TIER 3 (Water Waste): running_tap_water (or simulated water flow). Action: Alert to close the tap.
-      - TIER 4 (Guardian SMS): child_crying (or simulated child distress). Action: Send SMS to Parent.
-      - TIER 5 (Emergency Services Call): gun_shot, siren, jackhammer. Action: Call Emergency Services.
+      TIER 5 (CRITICAL): gun_shot, siren, jackhammer, explosion, glass_breaking
+          Action: Immediate emergency dispatch + Telegram alert
+      TIER 4 (GUARDIAN): children_playing, child_crying, elderly_distress
+          Action: Guardian SMS via Telegram
+      TIER 3 (HOME SAFETY): water_flow, drilling, gas_alarm
+          Action: Smart home warning + Telegram
+      TIER 2 (LOW ALERT): dog_bark, engine_idling, car_horn
+          Action: Dashboard notification
+      TIER 1 (AMBIENT): street_music, air_conditioner
+          Action: Log only (no notification)
     """
-    if sound_class == 'silence':
+    if sound_class in ('silence', '', None):
         return None
-        
+
     action_type = "Log Only"
     details = ""
     triggered = False
-    
-    # Load config values
+    telegram_classes = []  # classes that warrant Telegram push
+
+    # Load config values (deep copy — safe to mutate)
     try:
         from src.utils.config_loader import load_config
         config = load_config()
@@ -259,28 +275,50 @@ def process_priority_actions(sound_class: str, confidence: float, threat_score: 
         emergency_contact = '+1-555-0199'
         guardian_contact = '+1-555-0177'
 
-    # Retrieve current UI values from session_state
-    telegram_token = st.session_state.get('telegram_token', '')
-    telegram_chat_id = st.session_state.get('telegram_chat_id', '')
+    # Retrieve Telegram credentials from session_state
+    telegram_token = st.session_state.get('telegram_token', '') or os.environ.get('GUARDIAN_TELEGRAM_TOKEN', '')
+    telegram_chat_id = st.session_state.get('telegram_chat_id', '') or os.environ.get('GUARDIAN_TELEGRAM_CHAT_ID', '')
 
     # Action routing
-    if sound_class in ['gun_shot', 'siren', 'jackhammer']:
+    if sound_class in ('gun_shot', 'siren', 'jackhammer', 'explosion', 'glass_breaking', 'fire_alarm'):
         action_type = "🚨 EMERGENCY CALL PLACED"
-        details = f"Alerting emergency services at {emergency_contact}. Reason: Critical threat detected ({sound_class.replace('_',' ').title()} @ {confidence*100:.1f}% confidence)."
+        details = (
+            f"Alerting emergency services at {emergency_contact}. "
+            f"CRITICAL threat: {sound_class.replace('_',' ').title()} "
+            f"detected @ {confidence*100:.1f}% confidence."
+        )
         triggered = True
-    elif sound_class in ['children_playing', 'child_crying']:
+        telegram_classes = ['gun_shot', 'siren', 'jackhammer', 'explosion', 'glass_breaking', 'fire_alarm']
+
+    elif sound_class in ('children_playing', 'child_crying', 'baby_crying', 'elderly_distress'):
         action_type = "📧 GUARDIAN SMS SENT"
-        details = f"Sending alert message to Parents at {guardian_contact}: 'Distress/Crying acoustic patterns detected in the child room. Please check in immediately.'"
+        details = (
+            f"Alert sent to guardian at {guardian_contact}: "
+            f"'{sound_class.replace('_',' ').title()} patterns detected. Please check immediately.'"
+        )
         triggered = True
-    elif sound_class in ['water_flow', 'drilling']:
+        telegram_classes = ['children_playing', 'child_crying', 'baby_crying', 'elderly_distress']
+
+    elif sound_class in ('water_flow', 'drilling', 'gas_alarm', 'water_leakage'):
         action_type = "🚰 SMART HOME WARNING"
-        details = f"Water wastage warning: continuous running tap water signature detected. Please close the water tap!"
+        details = (
+            f"Home safety alert: {sound_class.replace('_',' ').title()} detected. "
+            f"Verify source and take corrective action immediately."
+        )
         triggered = True
-    elif sound_class in ['dog_bark', 'engine_idling', 'car_horn']:
+        telegram_classes = ['water_flow', 'gas_alarm', 'water_leakage']
+
+    elif sound_class in ('dog_bark', 'engine_idling', 'car_horn'):
         action_type = "🔔 DASHBOARD NOTICE"
-        details = f"Low threat event logged: {sound_class.replace('_', ' ').title()} in vicinity."
+        details = f"Low-threat event: {sound_class.replace('_', ' ').title()} in vicinity."
         triggered = True
-        
+        telegram_classes = []  # no Telegram for low-tier events
+
+    elif sound_class in ('street_music', 'air_conditioner'):
+        action_type = "📋 AMBIENT LOG"
+        details = f"Ambient sound logged: {sound_class.replace('_', ' ').title()}."
+        triggered = False  # ambient — don't add to triggered_actions
+
     if triggered:
         action_record = {
             'timestamp': time.strftime('%H:%M:%S'),
@@ -288,18 +326,21 @@ def process_priority_actions(sound_class: str, confidence: float, threat_score: 
             'threat_level': threat_level,
             'threat_score': threat_score,
             'action_type': action_type,
-            'details': details
+            'details': details,
         }
         if 'triggered_actions' not in st.session_state:
             st.session_state.triggered_actions = []
-            
-        # Prevent spamming duplicate consecutive triggers
-        if not st.session_state.triggered_actions or st.session_state.triggered_actions[0]['sound_class'] != sound_class or (time.time() - getattr(st.session_state, 'last_action_time', 0) > 5):
+
+        # Rate-limit: don't re-trigger same class within 5 seconds
+        last_action_time = getattr(st.session_state, 'last_action_time', 0)
+        last_class = st.session_state.triggered_actions[0]['sound_class'] if st.session_state.triggered_actions else None
+        cooldown_ok = (last_class != sound_class) or (time.time() - last_action_time > 5)
+
+        if cooldown_ok:
             st.session_state.triggered_actions.insert(0, action_record)
             st.session_state.triggered_actions = st.session_state.triggered_actions[:50]
             st.session_state.last_action_time = time.time()
 
-            # Push real-time Telegram Bot message if credentials are set
             if telegram_token and telegram_chat_id and sound_class in ['gun_shot', 'siren', 'jackhammer', 'children_playing', 'child_crying', 'water_flow']:
                 loc_label = st.session_state.get('location_override', 'Hostel').replace('_', ' ').title()
                 tg_msg = (
@@ -488,31 +529,63 @@ def render_sidebar():
         ])
 
     st.sidebar.divider()
-    st.sidebar.subheader("🔌 Mobile Alerts Integration")
+    st.sidebar.subheader("\U0001f4f1 Mobile Alerts \u2014 Telegram")
     telegram_token = st.sidebar.text_input(
-        "Telegram Bot Token", 
-        value=st.session_state.get('telegram_token', ''),
+        "Bot Token",
+        value=st.session_state.get('telegram_token', os.environ.get('GUARDIAN_TELEGRAM_TOKEN', '')),
         type="password",
-        help="Optional. Paste your bot token from @BotFather"
+        help="Get from @BotFather on Telegram"
     )
     telegram_chat_id = st.sidebar.text_input(
-        "Telegram Chat ID", 
-        value=st.session_state.get('telegram_chat_id', ''),
-        help="Optional. Chat ID from @userinfobot"
+        "Chat ID",
+        value=st.session_state.get('telegram_chat_id', os.environ.get('GUARDIAN_TELEGRAM_CHAT_ID', '')),
+        help="Get from @userinfobot on Telegram"
     )
     if telegram_token != st.session_state.get('telegram_token', ''):
         st.session_state.telegram_token = telegram_token
+        st.session_state.telegram_test_status = None
     if telegram_chat_id != st.session_state.get('telegram_chat_id', ''):
         st.session_state.telegram_chat_id = telegram_chat_id
+        st.session_state.telegram_test_status = None
+
+    tg_configured = bool(telegram_token and telegram_chat_id)
+    if tg_configured:
+        st.sidebar.success("\U0001f7e2 Telegram: Configured")
+        if st.sidebar.button("\U0001f4e4 Send Test Alert", key="tg_test_btn"):
+            try:
+                from src.notifications.telegram_service import TelegramAlertService
+                svc = TelegramAlertService(token=telegram_token, chat_id=telegram_chat_id)
+                ok = svc.send_test_alert()
+                st.session_state.telegram_test_status = "sent" if ok else "failed"
+            except Exception as _tg_err:
+                st.session_state.telegram_test_status = f"error: {_tg_err}"
+        tg_status = st.session_state.get('telegram_test_status')
+        if tg_status == "sent":
+            st.sidebar.success("\u2705 Test alert sent successfully!")
+        elif tg_status == "failed":
+            st.sidebar.error("\u274c Send failed \u2014 check token/chat_id")
+        elif tg_status and tg_status.startswith("error:"):
+            st.sidebar.error(f"\u274c {tg_status}")
+    else:
+        st.sidebar.warning("\U0001f534 Telegram: Not configured")
+        st.sidebar.caption("Enter Bot Token + Chat ID above to enable mobile alerts")
 
     st.sidebar.divider()
-    st.sidebar.markdown("**Status:** 🟢 ACTIVE")
-    st.sidebar.markdown("**Version:** 2.0 Professional")
+    # Live session statistics
+    elapsed = int(time.time() - st.session_state.get('session_start_time', time.time()))
+    h_e, rem_e = divmod(elapsed, 3600)
+    m_e, s_e = divmod(rem_e, 60)
+    st.sidebar.markdown(f"**\U0001f552 Session:** `{h_e:02d}:{m_e:02d}:{s_e:02d}`")
+    st.sidebar.markdown(f"**\U0001f50a Detections:** `{st.session_state.get('session_detection_count', 0)}`")
+    st.sidebar.markdown(f"**\U0001f6a8 Peak Threat:** `{st.session_state.get('session_peak_threat', 0)}/100`")
+    st.sidebar.markdown("**Status:** \U0001f7e2 ACTIVE")
+    st.sidebar.markdown("**Version:** 3.0 Production")
 
     # Set location override in state for the threaded Telegram sender
     st.session_state.location_override = location
 
     return location, threshold, page, sim_sound
+
 
 
 # ─────────────────────────────────────────────────

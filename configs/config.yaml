@@ -155,3 +155,12 @@ class_names:
   - jackhammer
   - siren
   - street_music
+
+# ─── Telegram Alerts ─────────────────────────────────
+telegram:
+  token: ""                    # Set via env var GUARDIAN_TELEGRAM_TOKEN
+  chat_id: ""                  # Set via env var GUARDIAN_TELEGRAM_CHAT_ID
+  retry_attempts: 3
+  retry_delay_seconds: 0.5
+  enabled: true
+  rate_limit_seconds: 5        # minimum seconds between same-class alerts

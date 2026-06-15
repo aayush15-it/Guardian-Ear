@@ -2,6 +2,9 @@
 
 Provides a cached ``load_config`` function so that every module in the
 project reads the same configuration dict without repeated disk I/O.
+Returns a **deep copy** of the cached dict so callers can mutate their
+local copy (e.g., override ``inference.location``) without corrupting
+the shared singleton.
 
 Usage::
 
@@ -13,9 +16,10 @@ Usage::
 
 from __future__ import annotations
 
+import copy
 import functools
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 try:
     import yaml
@@ -39,32 +43,9 @@ _DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "config.yaml
 
 
 @functools.lru_cache(maxsize=4)
-def load_config(path: str | None = None) -> Dict[str, Any]:
-    """Load and return the YAML configuration as a dictionary.
-
-    The result is cached via ``functools.lru_cache`` so subsequent calls
-    with the same *path* return the identical dict without re-reading
-    the file.
-
-    Args:
-        path: Absolute or relative path to a YAML config file.
-            Defaults to ``configs/config.yaml`` at the project root.
-
-    Returns:
-        A nested dictionary mirroring the YAML structure.
-
-    Raises:
-        FileNotFoundError: If the config file does not exist.
-        yaml.YAMLError: If the YAML content is malformed.
-
-    Examples:
-        >>> cfg = load_config()
-        >>> cfg["audio"]["sample_rate"]
-        22050
-        >>> cfg["class_names"][6]
-        'gun_shot'
-    """
-    config_path = Path(path) if path else _DEFAULT_CONFIG
+def _load_config_cached(path: str) -> Dict[str, Any]:
+    """Internal cached loader — returns the ORIGINAL dict (do not mutate)."""
+    config_path = Path(path)
 
     if not config_path.exists():
         raise FileNotFoundError(
@@ -92,7 +73,66 @@ def load_config(path: str | None = None) -> Dict[str, Any]:
     return config
 
 
-def reload_config(path: str | None = None) -> Dict[str, Any]:
+def load_config(path: Optional[str] = None) -> Dict[str, Any]:
+    """Load and return the YAML configuration as a **deep-copied** dictionary.
+
+    The raw config is cached internally to avoid repeated disk I/O.
+    Every call returns an independent deep copy so callers can safely
+    mutate their local instance (e.g., ``cfg['inference']['location'] = loc``)
+    without corrupting the shared singleton.
+
+    Args:
+        path: Absolute or relative path to a YAML config file.
+            Defaults to ``configs/config.yaml`` at the project root.
+
+    Returns:
+        A nested dictionary mirroring the YAML structure (deep copy).
+
+    Raises:
+        FileNotFoundError: If the config file does not exist.
+        yaml.YAMLError: If the YAML content is malformed.
+
+    Examples:
+        >>> cfg = load_config()
+        >>> cfg["audio"]["sample_rate"]
+        22050
+        >>> cfg["class_names"][6]
+        'gun_shot'
+    """
+    resolved = str(Path(path).resolve() if path else _DEFAULT_CONFIG)
+    return copy.deepcopy(_load_config_cached(resolved))
+
+
+def get_config_value(key_path: str, default: Any = None, path: Optional[str] = None) -> Any:
+    """Safely retrieve a nested config value using dot notation.
+
+    Args:
+        key_path: Dot-separated key path, e.g. ``'audio.sample_rate'``.
+        default: Value to return if the key is not found.
+        path: Optional config file path override.
+
+    Returns:
+        The value at the given key path, or ``default``.
+
+    Examples:
+        >>> get_config_value('audio.sample_rate')
+        22050
+        >>> get_config_value('audio.nonexistent', default=16000)
+        16000
+    """
+    cfg = load_config(path)
+    keys = key_path.split('.')
+    node: Any = cfg
+    for k in keys:
+        if not isinstance(node, dict):
+            return default
+        node = node.get(k, None)
+        if node is None:
+            return default
+    return node
+
+
+def reload_config(path: Optional[str] = None) -> Dict[str, Any]:
     """Clear the cache and reload the configuration from disk.
 
     Useful after programmatic edits to the config file or during
@@ -102,8 +142,8 @@ def reload_config(path: str | None = None) -> Dict[str, Any]:
         path: Same as :func:`load_config`.
 
     Returns:
-        A freshly-loaded configuration dictionary.
+        A freshly-loaded configuration dictionary (deep copy).
     """
-    load_config.cache_clear()
+    _load_config_cached.cache_clear()
     logger.info("Configuration cache cleared — reloading")
     return load_config(path)
