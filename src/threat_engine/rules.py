@@ -212,6 +212,13 @@ class ThreatAssessor:
         Returns:
             Threat score scaled to [0, 100].
         """
+        # SAFETY: silence is never a threat — return immediately.
+        # This guard prevents any edge-case where silence leaks through
+        # a caller's own guard, ensuring this method can never crash
+        # on an unknown/silence class.
+        if sound_class in ('silence', '', None):
+            return 0.0
+
         sw = self.sound_weights.get(sound_class, 0.5)
         lw = self.location_weights.get(location, 0.5)
         tw = self.get_time_weight(hour)

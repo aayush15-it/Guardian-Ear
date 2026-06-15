@@ -788,40 +788,40 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
             while st.session_state.live_monitoring:
                 # 1. Fetch data
                 if sim_sound != "None":
-                    # Simulated Event Trigger
                     sim_map = {
-                        "Gun Shot 🚨": "gun_shot",
-                        "Siren 🚨": "siren",
-                        "Child Crying 👶": "child_crying",
-                        "Running Tap Water 🚰": "water_flow",
-                        "Dog Bark ℹ️": "dog_bark",
-                        "Car Horn ℹ️": "car_horn"
+                        "Gun Shot \U0001f6a8": "gun_shot",
+                        "Siren \U0001f6a8": "siren",
+                        "Child Crying \U0001f476": "child_crying",
+                        "Running Tap Water \U0001f6b0": "water_flow",
+                        "Dog Bark \u2139\ufe0f": "dog_bark",
+                        "Car Horn \u2139\ufe0f": "car_horn"
                     }
                     mapped_class = sim_map[sim_sound]
                     preds = np.zeros(len(CLASS_NAMES))
                     if mapped_class in CLASS_NAMES:
-                        mapped_idx = CLASS_NAMES.index(mapped_class)
-                        preds[mapped_idx] = 0.99
+                        preds[CLASS_NAMES.index(mapped_class)] = 0.99
                     elif mapped_class == 'child_crying':
-                        mapped_idx = CLASS_NAMES.index('children_playing')
-                        preds[mapped_idx] = 0.99
+                        preds[CLASS_NAMES.index('children_playing')] = 0.99
                     elif mapped_class == 'water_flow':
-                        mapped_idx = CLASS_NAMES.index('drilling')
-                        preds[mapped_idx] = 0.99
-                    
+                        preds[CLASS_NAMES.index('drilling')] = 0.99
+                    best_idx = int(np.argmax(preds))
                     latest = {
-                        'class_name': CLASS_NAMES[np.argmax(preds)],
-                        'confidence': np.max(preds),
+                        'class_name': CLASS_NAMES[best_idx],
+                        'confidence': float(preds[best_idx]),
                         'all_probs': preds,
-                        'mode': get_sound_mode(CLASS_NAMES[np.argmax(preds)]),
+                        'mode': get_sound_mode(CLASS_NAMES[best_idx]),
                         'timestamp': time.time(),
-                        'alert': True
+                        'alert': True,
+                        'voted': True,
+                        'consecutive': 3,
+                        'rms': 0.05,
+                        'noise_floor': 0.001,
+                        'threat_score': 0,
+                        'threat_level': 'SAFE',
                     }
-                    # Draw a nice simulated sine waveform for action feedback
                     t_vals = np.linspace(0, 2, 8820)
                     raw_audio = 0.15 * np.random.normal(0, 0.1, 8820) + 0.3 * np.sin(2 * np.pi * 120 * t_vals)
                 else:
-                    # Real detector data
                     if st.session_state.detector:
                         latest = st.session_state.detector.get_latest_prediction()
                         raw_audio = st.session_state.detector.get_latest_audio_samples(8820)
@@ -829,102 +829,184 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                         latest = None
                         raw_audio = np.zeros(8820)
 
-                # 2. Render Live Waveform
-                wave_title.subheader("📈 Live Audio Stream")
-                downsampled = raw_audio[::40]  # Increased sample rate for better vis
-                wave_placeholder.line_chart(downsampled, height=140)
+                # 2. Live Waveform
+                wave_title.subheader("\U0001f4c8 Live Audio Stream")
+                wave_placeholder.line_chart(raw_audio[::40], height=140)
 
-                # 3. Process Prediction
-                if latest:
-                    c_name = latest['class_name']
-                    conf = latest['confidence']
-                    s_mode = latest['mode']
-                    conf_threshold_val = threshold / 100.0
-                    
-                    if c_name == 'silence':
-                        threat_score = 0
-                        threat_level = "SAFE"
-                        display_name = "Silence"
-                    elif c_name == 'child_crying':
-                        threat_score = 85
-                        threat_level = "HIGH"
-                        s_mode = "ASSISTIVE"
-                        display_name = "Child Crying (Distress)"
-                    elif c_name == 'water_flow':
-                        threat_score = 65
-                        threat_level = "MEDIUM"
-                        s_mode = "ASSISTIVE"
-                        display_name = "Running Tap Water (Wastage)"
-                    else:
-                        display_name = c_name.replace('_', ' ').title()
-                        tracker = st.session_state.tracker
-                        tracker.add_detection(c_name)
-                        pattern = tracker.get_pattern_summary(c_name)
-                        threat_score = assessor.calculate_threat_score(
-                            c_name, conf, location,
-                            pattern_score=pattern.pattern_score,
-                        )
-                        threat_level = assessor.get_threat_level(threat_score)
-                    
-                    # Only trigger priority actions for high-confidence detections
-                    if c_name != 'silence' and conf >= conf_threshold_val:
-                        process_priority_actions(c_name, conf, threat_score, threat_level)
-
-                    # Update Metrics column — ALWAYS show even if below threshold
+                # 3. System Health Monitor Row
+                if st.session_state.detector:
+                    health = st.session_state.detector.get_system_health()
                     with cols_placeholder.container():
-                        r1, r2, r3, r4 = st.columns(4)
-                        r1.metric("Live Sound", display_name)
-                        r2.metric("Confidence", f"{conf * 100:.1f}%" if c_name != 'silence' else "—")
-                        r3.metric("Threat Score", f"{threat_score}/100")
-                        r4.metric("Threat Level", threat_level)
-                        
-                        # Show info notice if below alert threshold (model IS working,
-                        # just not confident enough yet — reassure user)
-                        if c_name not in ('silence',) and conf < conf_threshold_val:
-                            st.info(
-                                f"ℹ️ Model detected **{display_name}** at **{conf*100:.1f}%** confidence "
-                                f"— below the **{threshold}%** alert threshold. Monitoring is active."
-                            )
+                        if latest:
+                            c_name = latest['class_name']
+                            conf = latest['confidence']
+                            s_mode = latest['mode']
+                            conf_threshold_val = threshold / 100.0
+                            rms_val = latest.get('rms', 0.0)
+                            noise_fl = latest.get('noise_floor', 0.0)
+                            voted = latest.get('voted', False)
+                            consecutive = latest.get('consecutive', 0)
 
-                    # Update Status panel
-                    with status_placeholder.container():
-                        st.subheader("📢 Active Monitoring Status")
-                        mode_class = f"mode-{s_mode.lower()}" if s_mode != 'NEUTRAL' else 'mode-neutral'
-                        icon = '🚨' if s_mode == 'ALERT' else 'ℹ️' if s_mode == 'ASSISTIVE' else '👁'
-                        st.markdown(
-                            f"<div class='{mode_class}'>{icon} {s_mode} MODE — {display_name} detected.</div>",
-                            unsafe_allow_html=True,
-                        )
-                        
-                        # Display active threat alerts only when above confidence threshold
-                        if threat_level != "SAFE" and conf >= conf_threshold_val:
+                            # Always use threat score from engine if available
+                            if c_name == 'silence':
+                                threat_score = 0
+                                threat_level = "SAFE"
+                                display_name = "Silence"
+                            elif c_name == 'child_crying':
+                                threat_score = 85
+                                threat_level = "HIGH"
+                                display_name = "Child Crying (Distress)"
+                                s_mode = "ASSISTIVE"
+                            elif c_name == 'water_flow':
+                                threat_score = 65
+                                threat_level = "MEDIUM"
+                                display_name = "Running Tap Water"
+                                s_mode = "ASSISTIVE"
+                            else:
+                                display_name = c_name.replace('_', ' ').title()
+                                threat_score = latest.get('threat_score',
+                                    assessor.calculate_threat_score(c_name, conf, location))
+                                threat_level = latest.get('threat_level',
+                                    assessor.get_threat_level(threat_score))
+
+                            # Only trigger actions when voted + above threshold
+                            if c_name not in ('silence', 'child_crying', 'water_flow') and \
+                               conf >= conf_threshold_val and voted:
+                                process_priority_actions(c_name, conf, threat_score, threat_level)
+
+                            # ── Detection metrics row ─────────────────────────
+                            r1, r2, r3, r4 = st.columns(4)
+                            r1.metric("\U0001f50a Live Sound", display_name)
+                            r2.metric("Confidence", f"{conf * 100:.1f}%" if c_name != 'silence' else "\u2014")
+                            r3.metric("Threat Score", f"{threat_score}/100")
+                            r4.metric("Threat Level", threat_level)
+
+                            # ── System health row ─────────────────────────────
+                            h1, h2, h3, h4 = st.columns(4)
+                            h1.metric("\U0001f3a4 Mic RMS", f"{rms_val:.4f}")
+                            h2.metric("Noise Floor", f"{noise_fl:.4f}")
+                            h3.metric("Chunks", health['chunk_count'])
+                            h4.metric("Vote Status",
+                                      f"{consecutive}/{st.session_state.detector._VOTE_WINDOW}"
+                                      if c_name != 'silence' else "\u2014")
+
+                            # ── Noise level bar ───────────────────────────────
+                            dyn_thresh = health['dynamic_threshold']
+                            rms_clamped = min(rms_val / max(dyn_thresh * 5, 0.01), 1.0)
+                            noise_color = (
+                                "#ef4444" if rms_clamped > 0.7 else
+                                "#f59e0b" if rms_clamped > 0.3 else "#22c55e"
+                            )
                             st.markdown(
-                                f"<div class='alert-{threat_level.lower()}'>"
-                                f"<b>{threat_level} THREAT DETECTED</b><br>"
-                                f"Sound: {display_name} | Location: {location.replace('_',' ').title()} | Score: {threat_score}/100"
-                                f"</div>",
+                                f"<div style='margin: 4px 0 8px; font-size: 0.82rem; color:#94a3b8;'>"
+                                f"\U0001f50a Noise Level"
+                                f"<div style='background:#1e293b; border-radius:6px; height:10px; margin-top:4px;'>"
+                                f"<div style='width:{rms_clamped*100:.0f}%; background:{noise_color}; "
+                                f"height:100%; border-radius:6px;'></div></div></div>",
                                 unsafe_allow_html=True,
                             )
+
+                            if c_name not in ('silence',) and conf < conf_threshold_val:
+                                st.info(
+                                    f"\u2139\ufe0f Model detected **{display_name}** at **{conf*100:.1f}%** "
+                                    f"\u2014 below the **{threshold}%** alert threshold. Monitoring active."
+                                )
+                            if c_name not in ('silence',) and not voted:
+                                st.caption(
+                                    f"\u23f3 Temporal voting: {consecutive}/{st.session_state.detector._VOTE_WINDOW} "
+                                    f"consecutive detections needed before escalation."
+                                )
+                        else:
+                            st.info("\U0001f399\ufe0f Calibrating live audio stream... (~3 seconds for first chunk)")
+
+                    # ── Active threat status ───────────────────────────────
+                    if latest and latest.get('class_name') not in ('silence', None):
+                        threat_level_now = latest.get('threat_level', 'SAFE')
+                        with status_placeholder.container():
+                            st.subheader("\U0001f4e2 Active Monitoring Status")
+                            s_mode_now = latest.get('mode', 'NEUTRAL')
+                            icon = '\U0001f6a8' if s_mode_now == 'ALERT' else '\u2139\ufe0f' if s_mode_now == 'ASSISTIVE' else '\U0001f441'
+                            mode_class = f"mode-{s_mode_now.lower()}" if s_mode_now != 'NEUTRAL' else 'mode-neutral'
+                            disp_name = latest['class_name'].replace('_', ' ').title()
+                            st.markdown(
+                                f"<div class='{mode_class}'>{icon} {s_mode_now} MODE \u2014 {disp_name} detected.</div>",
+                                unsafe_allow_html=True,
+                            )
+                            if threat_level_now != "SAFE" and latest.get('voted', False):
+                                st.markdown(
+                                    f"<div class='alert-{threat_level_now.lower()}'>"
+                                    f"<b>{threat_level_now} THREAT</b><br>"
+                                    f"Sound: {disp_name} | Location: {location.replace('_',' ').title()} "
+                                    f"| Score: {latest.get('threat_score', 0)}/100"
+                                    f"</div>",
+                                    unsafe_allow_html=True,
+                                )
+
+                    # ── Live Event Timeline (last 20) ──────────────────────
+                    history_list = st.session_state.detector.get_detection_history()
+                    if history_list:
+                        with actions_placeholder.container():
+                            col_tl, col_act = st.columns([1, 1])
+                            with col_tl:
+                                st.subheader("\U0001f4cb Live Event Timeline")
+                                for ev in history_list[:10]:
+                                    level_col = (
+                                        "#ef4444" if ev['threat_level'] == 'CRITICAL' else
+                                        "#f97316" if ev['threat_level'] == 'HIGH' else
+                                        "#eab308" if ev['threat_level'] == 'MEDIUM' else
+                                        "#22c55e" if ev['threat_level'] == 'LOW' else
+                                        "#475569"
+                                    )
+                                    icon_ev = '\U0001f6a8' if ev['mode'] == 'ALERT' else '\u2139\ufe0f' if ev['mode'] == 'ASSISTIVE' else '\U0001f4a4'
+                                    st.markdown(
+                                        f"<div style='border-left:3px solid {level_col}; "
+                                        f"padding: 4px 10px; margin: 3px 0; font-size:0.85rem;'>"
+                                        f"{icon_ev} <b>{ev['class_name'].replace('_',' ').title()}</b> "
+                                        f"<span style='color:#94a3b8'>{ev['confidence']:.0f}% | {ev['timestamp']}</span>"
+                                        f"</div>",
+                                        unsafe_allow_html=True,
+                                    )
+
+                            with col_act:
+                                st.subheader("\U0001f6a8 Live Action Dispatch Log")
+                                if st.session_state.triggered_actions:
+                                    for action in st.session_state.triggered_actions[:4]:
+                                        card_border = (
+                                            "#ef4444" if "\U0001f6a8" in action['action_type'] else
+                                            "#f59e0b" if "\U0001f4e7" in action['action_type'] else
+                                            "#3b82f6"
+                                        )
+                                        st.markdown(
+                                            f"<div style='border-left:5px solid {card_border}; "
+                                            f"padding-left:12px; margin:8px 0;'>"
+                                            f"<b>{action['action_type']}</b> \u2014 <small>{action['timestamp']}</small><br>"
+                                            f"<i>{action['details']}</i><br>"
+                                            f"<small>Threat: {action['threat_level']} ({action['threat_score']}/100)</small>"
+                                            f"</div>",
+                                            unsafe_allow_html=True,
+                                        )
+                                else:
+                                    st.info("Continuous monitoring active. No actions triggered yet.")
+
+                            # Confidence trend chart
+                            if len(history_list) >= 3:
+                                trend_data = [
+                                    ev['confidence'] for ev in reversed(history_list[:15])
+                                    if ev['class_name'] != 'silence'
+                                ]
+                                if trend_data:
+                                    st.subheader("\U0001f4c8 Confidence Trend")
+                                    st.line_chart(
+                                        pd.DataFrame({'Confidence (%)': trend_data}),
+                                        height=120,
+                                    )
+                    else:
+                        with actions_placeholder.container():
+                            st.info("Continuous monitoring active. No security or safety actions triggered yet.")
                 else:
+                    # Detector not yet initialised
                     with cols_placeholder.container():
-                        st.info("🎙️ Calibrating live audio stream... Waiting for first inference chunk (~3 seconds).")
-
-                # 4. Display Priority Action Engine Log
-                with actions_placeholder.container():
-                    st.subheader("🚨 Live Action Dispatch Log")
-                    if 'triggered_actions' in st.session_state and st.session_state.triggered_actions:
-                        for action in st.session_state.triggered_actions[:4]:
-                            card_border = "#ef4444" if "🚨" in action['action_type'] else "#f59e0b" if "📧" in action['action_type'] else "#3b82f6"
-                            st.markdown(
-                                f"<div style='border-left: 5px solid {card_border}; padding-left: 12px; margin: 10px 0;'>"
-                                f"<b>{action['action_type']}</b> — <small>{action['timestamp']}</small><br>"
-                                f"<i>{action['details']}</i><br>"
-                                f"<small>Threat: {action['threat_level']} ({action['threat_score']}/100)</small>"
-                                f"</div>",
-                                unsafe_allow_html=True,
-                            )
-                    else:
-                        st.info("Continuous monitoring active. No security or safety actions triggered yet.")
+                        st.info("\U0001f399\ufe0f Calibrating live audio stream... (~3 seconds for first chunk)")
 
                 time.sleep(1.0)
 
@@ -934,7 +1016,10 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
 # ─────────────────────────────────────────────────
 def page_assistive_hearing_mode(model, location, threshold, X_min, X_max, sim_sound="None"):
     """Render the accessibility page for the hearing-impaired."""
-    st.markdown("<div class='main-title'>♿ Assistive Hearing Mode</div>", unsafe_allow_html=True)
+    # CRITICAL FIX: bind assessor from session_state — was missing, causing NameError
+    assessor = st.session_state.assessor
+
+    st.markdown("<div class='main-title'>&#9851; Assistive Hearing Mode</div>", unsafe_allow_html=True)
     st.markdown(
         "<div class='subtitle'>"
         "Designed to assist hearing-impaired users by translating critical environmental sounds into clear visual and haptic feedback."
@@ -1039,30 +1124,44 @@ def page_assistive_hearing_mode(model, location, threshold, X_min, X_max, sim_so
                 conf = latest['confidence']
                 s_mode = latest['mode']
                 
+                # ———————————————————————————————————————————
+                # Classify prediction and compute threat score
+                # SAFETY: silence must ALWAYS short-circuit before calculate_threat_score
+                # ———————————————————————————————————————————
+                # Default safe values — always defined so display never crashes
+                threat_score = 0
+                threat_level = "SAFE"
+                display_name = c_name.replace('_', ' ').title()
+                caption = ""
+                bg_color = "linear-gradient(135deg, #111827, #1f2937)"
+                text_color = "#9ca3af"
+
                 if c_name == 'silence':
+                    # Silence: zero threat, no alerts, never reaches threat engine
                     threat_score = 0
                     threat_level = "SAFE"
                     display_name = "Silence"
                     caption = "Your environment is quiet."
-                    bg_color = "linear-gradient(135deg, #111827, #1f2937)" # Dark Neutral
+                    bg_color = "linear-gradient(135deg, #111827, #1f2937)"
                     text_color = "#9ca3af"
                 elif c_name == 'child_crying':
                     threat_score = 85
                     threat_level = "HIGH"
                     s_mode = "ASSISTIVE"
                     display_name = "Child Crying (Distress)"
-                    caption = "👶 WARNING: A baby crying distress signature has been detected in the child's room. Check immediately!"
-                    bg_color = "linear-gradient(135deg, #1e3a8a, #3b82f6)" # Blue Assistive Flash
+                    caption = "&#128118; WARNING: A baby crying distress signature has been detected. Check immediately!"
+                    bg_color = "linear-gradient(135deg, #1e3a8a, #3b82f6)"
                     text_color = "#bfdbfe"
                 elif c_name == 'water_flow':
                     threat_score = 65
                     threat_level = "MEDIUM"
                     s_mode = "ASSISTIVE"
                     display_name = "Running Tap Water (Wastage)"
-                    caption = "🚰 NOTICE: Continuous running water detected. Verify if a tap is left open."
-                    bg_color = "linear-gradient(135deg, #0c4a6e, #0ea5e9)" # Cyan Alert
+                    caption = "&#128688; NOTICE: Continuous running water detected. Verify if a tap is left open."
+                    bg_color = "linear-gradient(135deg, #0c4a6e, #0ea5e9)"
                     text_color = "#e0f2fe"
                 else:
+                    # Real sound class — safe to call calculate_threat_score
                     display_name = c_name.replace('_', ' ').title()
                     tracker = st.session_state.tracker
                     tracker.add_detection(c_name)
@@ -1072,14 +1171,14 @@ def page_assistive_hearing_mode(model, location, threshold, X_min, X_max, sim_so
                         pattern_score=pattern.pattern_score,
                     )
                     threat_level = assessor.get_threat_level(threat_score)
-                    
+
                     if s_mode == "ALERT":
-                        caption = f"🚨 URGENT: Emergency sound '{display_name}' detected! Seek safety or check surroundings immediately."
-                        bg_color = "linear-gradient(135deg, #7f1d1d, #ef4444)" # Red Flash
+                        caption = f"&#128680; URGENT: Emergency sound '{display_name}' detected! Seek safety immediately."
+                        bg_color = "linear-gradient(135deg, #7f1d1d, #ef4444)"
                         text_color = "#fca5a5"
                     else:
-                        caption = f"ℹ️ INFO: Assistive sound '{display_name}' detected nearby."
-                        bg_color = "linear-gradient(135deg, #1e293b, #334155)" # Grey notice
+                        caption = f"&#8505;&#65039; INFO: Assistive sound '{display_name}' detected nearby."
+                        bg_color = "linear-gradient(135deg, #1e293b, #334155)"
                         text_color = "#cbd5e1"
                 
                 # Trigger actions
