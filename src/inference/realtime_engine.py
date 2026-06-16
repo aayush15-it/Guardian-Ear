@@ -148,8 +148,10 @@ class RealTimeDetector:
 
         # ── Noise floor estimation ───────────────────────────
         # Rolling window of recent RMS values to estimate the background noise floor.
+        # The dynamic silence threshold is noise_floor * _SILENCE_SNR_MULTIPLIER.
+        self._rms_history: deque = deque(maxlen=self._NOISE_FLOOR_WINDOW)
         self._noise_floor: float = self._ABS_SILENCE_FLOOR
-        self._noise_window = deque(maxlen=self._NOISE_FLOOR_WINDOW)
+        self.current_rms: float = 0.0
 
         # ── Open-Set Classifier ────────────────────────────
         try:
@@ -157,11 +159,6 @@ class RealTimeDetector:
             self.osc = _osc_from_config()
         except Exception:
             self.osc = None
-
-        # The dynamic silence threshold is noise_floor * _SILENCE_SNR_MULTIPLIER.
-        self._rms_history: deque = deque(maxlen=self._NOISE_FLOOR_WINDOW)
-        self._noise_floor: float = self._ABS_SILENCE_FLOOR
-        self.current_rms: float = 0.0
 
         # ── Confidence smoothing ─────────────────────────────
         # Rolling window of (class_name, confidence, all_probs) for averaging.
@@ -224,13 +221,32 @@ class RealTimeDetector:
             logger.error("Failed to load model: %s", exc)
 
     def _load_normalization(self, model_dir: str) -> None:
-        """Load min/max normalization values from training."""
+        """Load global min/max normalization values saved during training.
+
+        These MUST match the values used during training exactly.
+        Using any other normalization (e.g. per-sample min-max) will produce
+        a completely different feature distribution and cause systematic
+        misclassification (e.g. all sounds collapsing to dog_bark).
+        """
         x_min_path = os.path.join(model_dir, 'X_min.npy')
         x_max_path = os.path.join(model_dir, 'X_max.npy')
         if os.path.exists(x_min_path) and os.path.exists(x_max_path):
             self.X_min = float(np.load(x_min_path)[0])
             self.X_max = float(np.load(x_max_path)[0])
-            logger.info("Normalization loaded: min=%.2f, max=%.2f", self.X_min, self.X_max)
+            logger.info(
+                "Normalization loaded: global_min=%.4f, global_max=%.4f (range=%.4f)",
+                self.X_min, self.X_max, self.X_max - self.X_min,
+            )
+        else:
+            # CRITICAL: Do NOT fall back to local per-sample normalization.
+            # That would produce a completely different distribution than training.
+            logger.error(
+                "CRITICAL: X_min.npy / X_max.npy not found in '%s'. "
+                "Model will produce WRONG predictions without correct normalization. "
+                "Re-run training (02_train_model.py) to regenerate these files.",
+                model_dir,
+            )
+            # Leave X_min/X_max as None — _extract_and_normalize will raise clearly.
 
     # ── Audio capture ───────────────────────────────────────
     def _audio_callback(self, indata: np.ndarray, frames: int,
@@ -284,19 +300,28 @@ class RealTimeDetector:
         }
 
     # ── Adaptive gain normalization ─────────────────────────
+    # Minimum absolute RMS required for inference. Below this the signal
+    # is indistinguishable from microphone noise and inference is skipped.
+    _MIN_INFERENCE_RMS: float = 0.0003  # ~-70 dBFS
+
     @staticmethod
     def _adaptive_gain(audio: np.ndarray, target_rms: float = 0.05) -> np.ndarray:
         """Normalize audio to a target RMS level.
 
-        This compensates for room acoustics, microphone distance, and
-        speaker-to-microphone capture volume differences. The model was
-        trained on studio-quality recordings; real microphone audio is
-        typically 10–40 dB quieter. Adaptive gain brings it to a
-        comparable amplitude before feature extraction.
+        Compensates for microphone distance and room acoustics so that live
+        audio reaches a comparable amplitude to the UrbanSound8K training data.
+
+        IMPORTANT: Gain is capped at 5× (was 20×). A 20× cap was amplifying
+        tap water, speech, and fan sounds to look like loud structured sounds,
+        causing them to collapse into dog_bark. 5× preserves relative dynamics
+        while still boosting genuinely quiet but real sounds.
+
+        If audio is below _MIN_INFERENCE_RMS after gain, the caller should
+        treat this chunk as silence and skip inference.
 
         Args:
             audio: Raw waveform.
-            target_rms: Desired RMS level (0.05 ≈ typical dataset RMS).
+            target_rms: Desired RMS level (0.05 ≈ median UrbanSound8K RMS).
 
         Returns:
             Gain-adjusted waveform, clipped to [-1, 1].
@@ -305,20 +330,32 @@ class RealTimeDetector:
         if rms < 1e-9:
             return audio
         gain = target_rms / rms
-        # Cap gain at 20× to avoid amplifying pure noise into false detections
-        gain = min(gain, 20.0)
+        # Cap at 5× — prevents quiet noise from being amplified into
+        # structured-sounding patterns that confuse the classifier.
+        gain = min(gain, 5.0)
         return np.clip(audio * gain, -1.0, 1.0)
 
     # ── Feature extraction + prediction ─────────────────────
     def _extract_and_normalize(self, audio: np.ndarray) -> np.ndarray:
-        """Extract features and normalize for model input."""
+        """Extract features and apply GLOBAL normalization for model input.
+
+        IMPORTANT: Only the global X_min / X_max values saved during training
+        are used. Per-sample normalization is deliberately NOT used as a
+        fallback — it silently destroys the feature distribution and causes
+        systematic misclassification (all sounds → dog_bark).
+
+        Raises:
+            RuntimeError: If normalization values were not loaded from disk.
+                          This is a hard error — caller must fix the model dir.
+        """
+        if self.X_min is None or self.X_max is None:
+            raise RuntimeError(
+                "Global normalization values (X_min / X_max) not loaded. "
+                "Check that model/X_min.npy and model/X_max.npy exist. "
+                "Re-run 02_train_model.py if they are missing."
+            )
         features = self.extractor.extract_features(audio, self.sample_rate)
-        if self.X_min is not None and self.X_max is not None:
-            features = (features - self.X_min) / (self.X_max - self.X_min + 1e-8)
-        else:
-            f_min, f_max = features.min(), features.max()
-            if f_max - f_min > 0:
-                features = (features - f_min) / (f_max - f_min)
+        features = (features - self.X_min) / (self.X_max - self.X_min + 1e-8)
         return features[np.newaxis, ..., np.newaxis]  # (1, 180, 130, 1)
 
     def predict(self, audio: np.ndarray) -> Tuple[str, float, np.ndarray, str]:
@@ -430,6 +467,22 @@ class RealTimeDetector:
 
                 # ── Adaptive gain ─────────────────────────────
                 audio_normalized = self._adaptive_gain(audio)
+
+                # ── Absolute RMS gate (post-gain) ─────────────
+                # If audio is still below the minimum inference floor even after
+                # gain amplification, treat it as background noise and skip.
+                # This catches sounds like very quiet fan hum or tap water that
+                # survive the dynamic silence threshold but are too quiet for
+                # reliable classification. Without this gate, the model receives
+                # amplified noise and collapses it to the nearest class (dog_bark).
+                post_gain_rms = float(np.sqrt(np.mean(audio_normalized ** 2)))
+                if post_gain_rms < self._MIN_INFERENCE_RMS:
+                    logger.debug(
+                        "Chunk #%d: Skipping — post-gain RMS %.5f below min inference floor %.5f",
+                        self._chunk_count, post_gain_rms, self._MIN_INFERENCE_RMS,
+                    )
+                    time.sleep(self.step_seconds)
+                    continue
 
                 # ── Model inference ───────────────────────────
                 class_name, confidence, all_probs, mode = self.predict(audio_normalized)

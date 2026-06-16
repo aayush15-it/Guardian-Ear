@@ -374,7 +374,17 @@ def process_priority_actions(sound_class: str, confidence: float, threat_score: 
 # FEATURE EXTRACTION
 # ─────────────────────────────────────────────────
 def extract_features_for_dashboard(audio, sr, X_min, X_max):
-    """Extract features and return raw components for visualization."""
+    """Extract features and return raw components for visualization.
+
+    NORMALIZATION NOTE:
+    Must use the global X_min / X_max values saved at training time
+    (model/X_min.npy, model/X_max.npy). These encode the global feature
+    range across all 78k+ training samples.
+
+    Per-sample normalization (computing min/max of just this 3-second clip)
+    destroys the relative feature distribution the model learned during
+    training and causes systematic misclassification (e.g. tap water → dog_bark).
+    """
     import librosa
 
     if len(audio) < SAMPLES:
@@ -401,13 +411,18 @@ def extract_features_for_dashboard(audio, sr, X_min, X_max):
 
     features = np.vstack([mel_db, mfcc, chroma])
 
-    if X_min is not None and X_max is not None:
-        features = (features - X_min) / (X_max - X_min + 1e-8)
-    else:
-        f_min, f_max = features.min(), features.max()
-        if f_max - f_min > 0:
-            features = (features - f_min) / (f_max - f_min)
+    if X_min is None or X_max is None:
+        # Hard failure: per-sample fallback is NOT acceptable here.
+        # Return unnormalized features and surface a visible error.
+        st.error(
+            "⛔ **Normalization files missing** — `model/X_min.npy` and/or "
+            "`model/X_max.npy` not found.\n\n"
+            "The model will produce **wrong predictions** without these files. "
+            "Re-run `02_train_model.py` to regenerate them, then restart the dashboard."
+        )
+        return features, mel_db, mfcc, chroma
 
+    features = (features - X_min) / (X_max - X_min + 1e-8)
     return features, mel_db, mfcc, chroma
 
 
