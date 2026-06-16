@@ -178,6 +178,14 @@ if 'session_peak_threat' not in st.session_state:
     st.session_state.session_peak_threat = 0
 if 'telegram_test_status' not in st.session_state:
     st.session_state.telegram_test_status = None
+# Open-set classifier — created once per session, reads from config.yaml
+if 'open_set_clf' not in st.session_state:
+    try:
+        from src.inference.open_set import from_config as _osc_from_config
+        st.session_state.open_set_clf = _osc_from_config()
+    except Exception:
+        st.session_state.open_set_clf = None
+
 
 
 
@@ -649,98 +657,139 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                 )
 
             if model is not None:
-                with st.spinner("🧠 Running CRNN inference..."):
+                with st.spinner("\U0001f9e0 Running CRNN inference..."):
                     inp = features[np.newaxis, ..., np.newaxis]
                     preds = model.predict(inp, verbose=0)[0]
                     class_id = int(np.argmax(preds))
                     confidence = float(preds[class_id])
                     class_name = CLASS_NAMES[class_id]
 
-                # Use session_state tracker to avoid duplicate alerts
-                tracker = st.session_state.tracker
-                sound_mode = get_sound_mode(class_name)
-                description = get_mode_description(class_name)
+                # ── Open-Set Rejection ─────────────────────────────────
+                osc = st.session_state.get('open_set_clf')
+                osc_result = osc.classify(preds) if osc else None
+                is_known = osc_result['is_known'] if osc_result else True
 
-                tracker.add_detection(class_name)
-                pattern = tracker.get_pattern_summary(class_name)
-
-                threat_score = assessor.calculate_threat_score(
-                    class_name, confidence, location,
-                    pattern_score=pattern.pattern_score,
-                )
-                threat_level = assessor.get_threat_level(threat_score)
-                threat_color = assessor.get_threat_color(threat_level)
-
-                # Process Actions
-                process_priority_actions(class_name, confidence, threat_score, threat_level)
-
-                st.divider()
-
-                # Result
-                st.subheader("🎯 Detection Result")
-                r1, r2, r3, r4 = st.columns(4)
-                r1.metric("Sound", class_name.replace('_', ' ').title())
-                r2.metric("Confidence", f"{confidence * 100:.1f}%")
-                r3.metric("Threat", f"{threat_score}/100")
-                r4.metric("Level", threat_level)
-
-                # Mode
-                st.subheader("🔊 Sound Mode")
-                mode_class = f"mode-{sound_mode.lower()}" if sound_mode != 'NEUTRAL' else 'mode-neutral'
-                icon = '🚨' if sound_mode == 'ALERT' else 'ℹ️' if sound_mode == 'ASSISTIVE' else '👁'
-                st.markdown(
-                    f"<div class='{mode_class}'>{icon} {sound_mode} MODE — {description}</div>",
-                    unsafe_allow_html=True,
-                )
-
-                # Pattern
-                st.subheader("⏱️ Temporal Pattern Analysis")
-                p1, p2, p3, p4 = st.columns(4)
-                p1.metric("Pattern", pattern.pattern_label)
-                p2.metric("Score", f"{pattern.pattern_score:.2f}")
-                p3.metric("Detections", pattern.detection_count)
-                p4.metric("Duration", f"{pattern.duration_seconds}s")
-                st.progress(float(pattern.pattern_score))
-
-                if pattern.should_escalate:
+                if not is_known:
+                    st.divider()
+                    st.subheader("\U0001f9ff Open-Set Rejection — MONITORING")
                     st.markdown(
-                        "<div class='escalation-warn'>"
-                        "⚠️ ESCALATION — Sound pattern abnormally sustained!"
+                        "<div style='background:linear-gradient(135deg,#1e1b4b,#312e81);"
+                        "border-left:5px solid #818cf8;padding:16px 20px;"
+                        "border-radius:12px;margin:10px 0;'>"
+                        "<b style='color:#a5b4fc;font-size:1.1rem;'>\U0001f441 MONITORING MODE</b><br/>"
+                        "<span style='color:#c7d2fe;'>This sound does not confidently match any trained class. "
+                        "Guardian Ear is watching but will NOT raise a false alert.</span>"
                         "</div>",
                         unsafe_allow_html=True,
                     )
+                    g1, g2, g3, g4 = st.columns(4)
+                    g1.metric("Nearest Class", class_name.replace('_',' ').title())
+                    g2.metric("Confidence", f"{osc_result['confidence']*100:.1f}%")
+                    g3.metric("Top-2 Margin", f"{osc_result['top2_margin']*100:.1f}%")
+                    g4.metric("Entropy", f"{osc_result['entropy']:.3f} nats")
+                    st.info(
+                        f"\U0001f6ab **Rejection reason:** {osc_result['rejection_reason']}\n\n"
+                        "The model's confidence is too low or the prediction is too ambiguous "
+                        "to classify reliably. This is the Open-Set Rejection working correctly — "
+                        "it prevented a potential **false positive**."
+                    )
+                    st.caption(
+                        "To adjust sensitivity, edit `open_set.confidence_threshold` in `configs/config.yaml`."
+                    )
+                    # Show probability chart so user can see the distribution
+                    st.subheader("\U0001f4ca Class Probabilities (for reference)")
+                    prob_df = pd.DataFrame({
+                        'Sound Class': [c.replace('_', ' ').title() for c in CLASS_NAMES],
+                        'Probability (%)': preds * 100,
+                    }).sort_values('Probability (%)', ascending=False)
+                    st.bar_chart(prob_df.set_index('Sound Class')['Probability (%)'])
 
-                # Threat box
-                st.subheader("🚨 Threat Assessment")
-                level_lower = threat_level.lower()
-                if level_lower in ('critical', 'high', 'medium', 'low'):
+                else:
+                    # ── Known sound — continue normal threat pipeline ──
+                    tracker = st.session_state.tracker
+                    sound_mode = osc_result.get('sound_mode', get_sound_mode(class_name)) if osc_result else get_sound_mode(class_name)
+                    description = get_mode_description(class_name)
+
+                    tracker.add_detection(class_name)
+                    pattern = tracker.get_pattern_summary(class_name)
+
+                    threat_score = assessor.calculate_threat_score(
+                        class_name, confidence, location,
+                        pattern_score=pattern.pattern_score,
+                    )
+                    threat_level = assessor.get_threat_level(threat_score)
+                    threat_color = assessor.get_threat_color(threat_level)
+
+                    # Process Actions
+                    process_priority_actions(class_name, confidence, threat_score, threat_level)
+
+                    st.divider()
+
+                    # Result
+                    st.subheader("🎯 Detection Result")
+                    r1, r2, r3, r4 = st.columns(4)
+                    r1.metric("Sound", class_name.replace('_', ' ').title())
+                    r2.metric("Confidence", f"{confidence * 100:.1f}%")
+                    r3.metric("Threat", f"{threat_score}/100")
+                    r4.metric("Level", threat_level)
+
+                    # Mode
+                    st.subheader("🔊 Sound Mode")
+                    mode_class = f"mode-{sound_mode.lower()}" if sound_mode != 'NEUTRAL' else 'mode-neutral'
+                    icon = '🚨' if sound_mode == 'ALERT' else 'ℹ️' if sound_mode == 'ASSISTIVE' else '👁'
                     st.markdown(
-                        f"<div class='alert-{level_lower}'>"
-                        f"<b>{threat_level} ALERT</b><br>"
-                        f"Sound: {class_name.replace('_',' ').title()}"
-                        f" | Mode: {sound_mode}"
-                        f" | Confidence: {confidence*100:.1f}%"
-                        f" | Location: {location.replace('_',' ').title()}"
-                        f" | Score: {threat_score}/100"
-                        f"</div>",
+                        f"<div class='{mode_class}'>{icon} {sound_mode} MODE — {description}</div>",
                         unsafe_allow_html=True,
                     )
 
-                # Action Engine log
-                st.subheader("🚨 Triggered Action")
-                if 'triggered_actions' in st.session_state and st.session_state.triggered_actions:
-                    latest_action = st.session_state.triggered_actions[0]
-                    st.info(f"**{latest_action['action_type']}** — {latest_action['details']}")
-                else:
-                    st.success("No emergency action required.")
+                    # Pattern
+                    st.subheader("⏱️ Temporal Pattern Analysis")
+                    p1, p2, p3, p4 = st.columns(4)
+                    p1.metric("Pattern", pattern.pattern_label)
+                    p2.metric("Score", f"{pattern.pattern_score:.2f}")
+                    p3.metric("Detections", pattern.detection_count)
+                    p4.metric("Duration", f"{pattern.duration_seconds}s")
+                    st.progress(float(pattern.pattern_score))
 
-                # Probability chart
-                st.subheader("📊 Class Probabilities")
-                prob_df = pd.DataFrame({
-                    'Sound Class': [c.replace('_', ' ').title() for c in CLASS_NAMES],
-                    'Probability (%)': preds * 100,
-                }).sort_values('Probability (%)', ascending=False)
-                st.bar_chart(prob_df.set_index('Sound Class')['Probability (%)'])
+                    if pattern.should_escalate:
+                        st.markdown(
+                            "<div class='escalation-warn'>"
+                            "⚠️ ESCALATION — Sound pattern abnormally sustained!"
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                    # Threat box
+                    st.subheader("🚨 Threat Assessment")
+                    level_lower = threat_level.lower()
+                    if level_lower in ('critical', 'high', 'medium', 'low'):
+                        st.markdown(
+                            f"<div class='alert-{level_lower}'>"
+                            f"<b>{threat_level} ALERT</b><br>"
+                            f"Sound: {class_name.replace('_',' ').title()}"
+                            f" | Mode: {sound_mode}"
+                            f" | Confidence: {confidence*100:.1f}%"
+                            f" | Location: {location.replace('_',' ').title()}"
+                            f" | Score: {threat_score}/100"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                    # Action Engine log
+                    st.subheader("🚨 Triggered Action")
+                    if 'triggered_actions' in st.session_state and st.session_state.triggered_actions:
+                        latest_action = st.session_state.triggered_actions[0]
+                        st.info(f"**{latest_action['action_type']}** — {latest_action['details']}")
+                    else:
+                        st.success("No emergency action required.")
+
+                    # Probability chart
+                    st.subheader("📊 Class Probabilities")
+                    prob_df = pd.DataFrame({
+                        'Sound Class': [c.replace('_', ' ').title() for c in CLASS_NAMES],
+                        'Probability (%)': preds * 100,
+                    }).sort_values('Probability (%)', ascending=False)
+                    st.bar_chart(prob_df.set_index('Sound Class')['Probability (%)'])
 
                 # Grad-CAM
                 st.subheader("🔍 Grad-CAM Explainability")
@@ -943,14 +992,28 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                                     assessor.get_threat_level(threat_score))
 
                             # Only trigger actions when voted + above threshold
-                            if c_name not in ('silence', 'child_crying', 'water_flow') and \
+                            if c_name not in ('silence', 'child_crying', 'water_flow', 'unknown') and \
                                conf >= conf_threshold_val and voted:
                                 process_priority_actions(c_name, conf, threat_score, threat_level)
+
+                            # ── Open-Set Rejection UI (Live Mode) ─────────────────
+                            osc_res = latest.get('osc_result')
+                            if osc_res and not osc_res.get('is_known', True):
+                                st.markdown(
+                                    "<div style='background:linear-gradient(135deg,#1e1b4b,#312e81);"
+                                    "border-left:5px solid #818cf8;padding:12px 16px;"
+                                    "border-radius:10px;margin-bottom:12px;'>"
+                                    "<b style='color:#a5b4fc;font-size:1.0rem;'>\U0001f441 MONITORING MODE: "
+                                    f"Rejected '{osc_res['class_name'].replace('_', ' ').title()}'</b><br/>"
+                                    f"<span style='color:#c7d2fe;font-size:0.9rem;'>{osc_res['rejection_reason']}</span>"
+                                    "</div>",
+                                    unsafe_allow_html=True,
+                                )
 
                             # ── Detection metrics row ─────────────────────────
                             r1, r2, r3, r4 = st.columns(4)
                             r1.metric("\U0001f50a Live Sound", display_name)
-                            r2.metric("Confidence", f"{conf * 100:.1f}%" if c_name != 'silence' else "\u2014")
+                            r2.metric("Confidence", f"{conf * 100:.1f}%" if c_name not in ('silence', 'unknown') else "\u2014")
                             r3.metric("Threat Score", f"{threat_score}/100")
                             r4.metric("Threat Level", threat_level)
 

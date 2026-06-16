@@ -148,6 +148,16 @@ class RealTimeDetector:
 
         # ── Noise floor estimation ───────────────────────────
         # Rolling window of recent RMS values to estimate the background noise floor.
+        self._noise_floor: float = self._ABS_SILENCE_FLOOR
+        self._noise_window = deque(maxlen=self._NOISE_FLOOR_WINDOW)
+
+        # ── Open-Set Classifier ────────────────────────────
+        try:
+            from src.inference.open_set import from_config as _osc_from_config
+            self.osc = _osc_from_config()
+        except Exception:
+            self.osc = None
+
         # The dynamic silence threshold is noise_floor * _SILENCE_SNR_MULTIPLIER.
         self._rms_history: deque = deque(maxlen=self._NOISE_FLOOR_WINDOW)
         self._noise_floor: float = self._ABS_SILENCE_FLOOR
@@ -424,10 +434,20 @@ class RealTimeDetector:
                 # ── Model inference ───────────────────────────
                 class_name, confidence, all_probs, mode = self.predict(audio_normalized)
 
+                # ── Open-Set Rejection ────────────────────────
+                osc_result = None
+                if self.osc:
+                    osc_result = self.osc.classify(all_probs)
+                    if not osc_result['is_known']:
+                        class_name = 'unknown'
+                        confidence = osc_result['confidence']
+                        mode = osc_result['sound_mode']
+
                 # ── Confidence smoothing ──────────────────────
                 class_name, confidence, all_probs = self._smooth_prediction(
                     class_name, confidence, all_probs
                 )
+
 
                 # ── Temporal voting ───────────────────────────
                 consecutive = self._update_vote(class_name)
@@ -490,8 +510,10 @@ class RealTimeDetector:
                         'noise_floor': self._noise_floor,
                         'threat_score': threat_score,
                         'threat_level': threat_level,
+                        'osc_result': osc_result,
                     }
                     self._detection_history.append(event)
+
 
                 time.sleep(self.step_seconds)
 

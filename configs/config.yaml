@@ -129,7 +129,7 @@ action_engine:
   enable_call_sim: true
   telegram_token: ""            # Optional Bot token for real-time mobile notifications
   telegram_chat_id: ""          # Optional Chat ID for bot notifications
-  
+
   # Action thresholds
   water_flow_duration_limit: 10 # alert user if water flows for > 10 seconds
   child_distress_repetition_limit: 3 # alert parent if child cries > 3 times
@@ -164,3 +164,30 @@ telegram:
   retry_delay_seconds: 0.5
   enabled: true
   rate_limit_seconds: 5        # minimum seconds between same-class alerts
+
+# ─── Open-Set Rejection ──────────────────────────────
+# Prevents unknown sounds from being forced into a known class.
+# Tap water, white noise, microwave beeps etc. will show
+# as MONITORING mode instead of a spurious dog_bark or siren.
+#
+# Tune these thresholds without touching any Python code:
+#   Lower  confidence_threshold  → more sounds labelled as MONITORING
+#   Higher entropy_threshold     → less strict (fewer unknowns accepted)
+#   Lower  margin_threshold      → reject ambiguous top-2 predictions
+open_set:
+  confidence_threshold: 0.70   # min confidence to accept a prediction (0.0–1.0)
+  entropy_threshold: 1.80      # max Shannon entropy (nats); uniform=log(10)≈2.303
+  margin_threshold: 0.20       # min gap between top-1 and top-2 probability
+  enabled: true                # set false to disable open-set gating entirely
+
+# ─── Temporal Voting ─────────────────────────────────
+# Prevents single-frame false positives (e.g. tap water → dog_bark 57%).
+# A sound must be consistently detected across N consecutive windows
+# before an alert fires.
+#
+# Example: window_size=5, min_votes=3 means the model must predict
+# the same class in at least 3 of the last 5 one-second windows.
+temporal_voting:
+  window_size: 5               # rolling window size (number of recent frames)
+  min_votes: 3                 # minimum consistent predictions needed to confirm
+  enabled: true                # set false to escalate on every single frame
