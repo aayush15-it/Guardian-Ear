@@ -22,6 +22,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
 
 import numpy as np
@@ -39,6 +40,7 @@ except ImportError:
         return logging.getLogger(name)
 
 logger = get_logger(__name__)
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -180,12 +182,13 @@ class RealTimeDetector:
         # ── Normalization values ─────────────────────────────
         self.X_min: Optional[float] = None
         self.X_max: Optional[float] = None
-        self._load_normalization(paths_cfg.get('model_dir', 'model'))
+        model_dir = paths_cfg.get('model', paths_cfg.get('model_dir', 'model'))
+        self._load_normalization(model_dir)
 
         # ── Model ────────────────────────────────────────────
         self.model = model
         if self.model is None:
-            self._load_model(paths_cfg.get('model_dir', 'model'))
+            self._load_model(model_dir)
 
         # ── Threading ────────────────────────────────────────
         self._stop_event = threading.Event()
@@ -204,18 +207,22 @@ class RealTimeDetector:
     # ── Model / normalization loading ───────────────────────
     def _load_model(self, model_dir: str) -> None:
         """Load the Keras model from disk."""
-        model_path = os.path.join(model_dir, 'guardian_ear_model.h5')
+        model_dir_path = Path(model_dir)
+        if not model_dir_path.is_absolute():
+            model_dir_path = _PROJECT_ROOT / model_dir_path
+
+        model_path = model_dir_path / 'guardian_ear_model.h5'
         if not os.path.exists(model_path):
-            fallback_path = os.path.join(model_dir, 'best_model.h5')
+            fallback_path = model_dir_path / 'best_model.h5'
             if os.path.exists(fallback_path):
                 model_path = fallback_path
 
         if not os.path.exists(model_path):
-            logger.error("Model not found at %s", os.path.join(model_dir, 'guardian_ear_model.h5'))
+            logger.error("Model not found at %s", model_dir_path / 'guardian_ear_model.h5')
             return
         try:
             import tensorflow as tf
-            self.model = tf.keras.models.load_model(model_path)
+            self.model = tf.keras.models.load_model(str(model_path))
             logger.info("Model loaded: %s", model_path)
         except Exception as exc:
             logger.error("Failed to load model: %s", exc)
@@ -228,8 +235,12 @@ class RealTimeDetector:
         a completely different feature distribution and cause systematic
         misclassification (e.g. all sounds collapsing to dog_bark).
         """
-        x_min_path = os.path.join(model_dir, 'X_min.npy')
-        x_max_path = os.path.join(model_dir, 'X_max.npy')
+        model_dir_path = Path(model_dir)
+        if not model_dir_path.is_absolute():
+            model_dir_path = _PROJECT_ROOT / model_dir_path
+
+        x_min_path = model_dir_path / 'X_min.npy'
+        x_max_path = model_dir_path / 'X_max.npy'
         if os.path.exists(x_min_path) and os.path.exists(x_max_path):
             self.X_min = float(np.load(x_min_path)[0])
             self.X_max = float(np.load(x_max_path)[0])

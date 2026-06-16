@@ -30,7 +30,7 @@ alerts/alert_log.csv
 
 # Large Datasets & Model Weights
 dataset/
-features/
+/features/
 # Exclude model weights to keep git push lightweight
 model/best_model.h5
 model/guardian_ear_model.h5

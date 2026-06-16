@@ -428,7 +428,7 @@ async def send_alert(req: AlertRequest) -> AlertResponse:
 
         ok = service.send_alert(
             sound_class=req.sound_class,
-            confidence=req.confidence * 100,
+            confidence=req.confidence,
             threat_level=req.threat_level,
             threat_score=req.threat_score,
             location=req.location,
