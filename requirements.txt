@@ -38,3 +38,7 @@ onnxruntime>=1.15.0
 pytest>=7.0.0
 tqdm>=4.66.0
 pydantic>=2.0.0
+
+# Emergency Notification System
+plyer>=2.1.0             # Cross-platform desktop notifications
+win10toast-click>=0.1.2  # Windows toast notifications (fallback)
