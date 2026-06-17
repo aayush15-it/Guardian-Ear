@@ -562,27 +562,65 @@ def render_sidebar():
         ])
 
     st.sidebar.divider()
-    tg_configured = bool(telegram_token and telegram_chat_id)
-    if tg_configured:
-        st.sidebar.success("\U0001f7e2 Telegram: Configured")
-        if st.sidebar.button("\U0001f4e4 Send Test Alert", key="tg_test_btn"):
-            try:
-                from src.notifications.telegram_service import TelegramAlertService
-                svc = TelegramAlertService(token=telegram_token, chat_id=telegram_chat_id)
-                ok = svc.send_test_alert()
-                st.session_state.telegram_test_status = "sent" if ok else "failed"
-            except Exception as _tg_err:
-                st.session_state.telegram_test_status = f"error: {_tg_err}"
-        tg_status = st.session_state.get('telegram_test_status')
-        if tg_status == "sent":
-            st.sidebar.success("\u2705 Test alert sent successfully!")
-        elif tg_status == "failed":
-            st.sidebar.error("\u274c Send failed \u2014 check token/chat_id")
-        elif tg_status and tg_status.startswith("error:"):
-            st.sidebar.error(f"\u274c {tg_status}")
-    else:
-        st.sidebar.warning("\U0001f534 Telegram: Not configured")
-        st.sidebar.caption("Enter Bot Token + Chat ID above to enable mobile alerts")
+    st.sidebar.subheader("\U0001f6a8 Emergency Notification System")
+
+    # ── Emergency Contact ──────────────────────────────────────────────
+    with st.sidebar.expander("\U0001f4de Emergency Contact", expanded=True):
+        ec_name = st.text_input(
+            "Contact Name",
+            value=st.session_state.get('ec_name', ''),
+            placeholder="e.g. Parent / Guardian",
+            key="ec_name_input"
+        )
+        ec_phone = st.text_input(
+            "Phone Number",
+            value=st.session_state.get('ec_phone', ''),
+            placeholder="+91XXXXXXXXXX",
+            key="ec_phone_input"
+        )
+        ec_email_val = st.text_input(
+            "Email Address",
+            value=st.session_state.get('ec_email', ''),
+            placeholder="guardian@example.com",
+            key="ec_email_input"
+        )
+        if ec_name != st.session_state.get('ec_name', ''):
+            st.session_state.ec_name = ec_name
+        if ec_phone != st.session_state.get('ec_phone', ''):
+            st.session_state.ec_phone = ec_phone
+        if ec_email_val != st.session_state.get('ec_email', ''):
+            st.session_state.ec_email = ec_email_val
+
+    # ── Alert Channel Status ───────────────────────────────────────────
+    with st.sidebar.expander("\U0001f514 Alert Channels", expanded=True):
+        desktop_on = st.checkbox("\U0001f5a5\ufe0f Desktop Notifications", value=True, key="chk_desktop")
+        email_on = st.checkbox("\U0001f4e7 Email Alerts", value=bool(st.session_state.get('ec_email')), key="chk_email")
+        _contact_ok = bool(st.session_state.get('ec_name') or st.session_state.get('ec_phone'))
+        st.markdown(
+            f"{'🟢' if desktop_on else '🔴'} Desktop  |  "
+            f"{'🟢' if email_on and st.session_state.get('ec_email') else '🔴'} Email  |  "
+            f"{'🟢' if _contact_ok else '🟡'} Contact"
+        )
+
+    # ── Test Button ────────────────────────────────────────────────────
+    if st.sidebar.button("\U0001f9ea Send Test Emergency Alert", key="emergency_test_btn", type="primary"):
+        try:
+            eng = _get_emergency_engine()
+            if eng:
+                result = eng.send_test_alert()
+                st.session_state.emergency_test_status = result
+            else:
+                st.session_state.emergency_test_status = {'error': 'Engine not available'}
+        except Exception as _err:
+            st.session_state.emergency_test_status = {'error': str(_err)}
+
+    _test_result = st.session_state.get('emergency_test_status')
+    if _test_result:
+        if isinstance(_test_result, dict) and 'error' not in _test_result:
+            _desktop = _test_result.get('desktop', False)
+            st.sidebar.success(f"\u2705 Test fired! Desktop: {'✓' if _desktop else '✗'}")
+        elif isinstance(_test_result, dict):
+            st.sidebar.error(f"\u274c {_test_result.get('error', 'Unknown error')}")
 
     st.sidebar.divider()
     # Live session statistics
@@ -595,7 +633,7 @@ def render_sidebar():
     st.sidebar.markdown("**Status:** \U0001f7e2 ACTIVE")
     st.sidebar.markdown("**Version:** 3.0 Production")
 
-    # Set location override in state for the threaded Telegram sender
+    # Set location override in state for the background Notification Engine
     st.session_state.location_override = location
 
     return location, threshold, page, sim_sound
