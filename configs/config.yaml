@@ -122,17 +122,23 @@ inference:
 
 # ─── Priority-Based Action Engine ────────────────────
 action_engine:
-  emergency_contact: "+1-555-0199"
-  guardian_contact: "+1-555-0177"
+  enable_desktop_sim: true
   enable_email_sim: true
-  enable_sms_sim: true
-  enable_call_sim: true
-  telegram_token: ""            # Optional Bot token for real-time mobile notifications
-  telegram_chat_id: ""          # Optional Chat ID for bot notifications
+  enable_contact_sim: true
 
   # Action thresholds
-  water_flow_duration_limit: 10 # alert user if water flows for > 10 seconds
+  water_flow_duration_limit: 10      # alert if water flows > 10 seconds
   child_distress_repetition_limit: 3 # alert parent if child cries > 3 times
+
+# ─── Emergency Contact ─────────────────────────────────
+# Displayed in emergency escalation simulations.
+# In future versions, this will drive real SMS/Voice calls.
+emergency_contact:
+  name: ""                    # e.g. Parent / Guardian
+  phone: ""                   # e.g. +91XXXXXXXXXX
+  email: ""                   # e.g. parent@example.com
+  enabled: true
+  rate_limit_seconds: 30      # minimum seconds between same-class escalations
 
 # ─── File Paths ───────────────────────────────────────
 paths:
@@ -156,14 +162,34 @@ class_names:
   - siren
   - street_music
 
-# ─── Telegram Alerts ─────────────────────────────────
-telegram:
-  token: ""                    # Set via env var GUARDIAN_TELEGRAM_TOKEN
-  chat_id: ""                  # Set via env var GUARDIAN_TELEGRAM_CHAT_ID
+# ─── Email Alert Service ────────────────────────────────────
+# Uses standard SMTP (no external libraries required).
+# Leave blank to disable email alerts.
+email_alerts:
+  sender_email: ""             # Gmail or SMTP address
+  sender_password: ""          # App password (not account password)
+  recipient_email: ""          # Where to send alerts
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  enabled: false               # Enable only when sender credentials are set
   retry_attempts: 3
-  retry_delay_seconds: 0.5
-  enabled: true
-  rate_limit_seconds: 5        # minimum seconds between same-class alerts
+  subject_prefix: "[Guardian Ear Alert]"
+
+# ─── Desktop Notifications ───────────────────────────────
+# Works offline with plyer (recommended) or win10toast.
+# Fires automatically on CRITICAL threats.
+desktop_notifications:
+  enabled: true                # Enable desktop popup alerts
+  timeout_seconds: 10          # How long notification stays visible
+  min_threat_level: "HIGH"     # Minimum level: LOW / MEDIUM / HIGH / CRITICAL
+
+# ─── Telegram (Archived) ────────────────────────────────
+# Kept for reference. Replaced by Emergency Notification Engine.
+# To re-enable: set enabled: true and provide credentials.
+telegram:
+  enabled: false
+  token: ""                    # GUARDIAN_TELEGRAM_TOKEN env var
+  chat_id: ""                  # GUARDIAN_TELEGRAM_CHAT_ID env var
 
 # ─── Open-Set Rejection ──────────────────────────────
 # Prevents unknown sounds from being forced into a known class.
@@ -191,3 +217,46 @@ temporal_voting:
   window_size: 5               # rolling window size (number of recent frames)
   min_votes: 3                 # minimum consistent predictions needed to confirm
   enabled: true                # set false to escalate on every single frame
+
+# ─── Emergency Notification Engine ───────────────────────────────────────────
+# Consumed by src/notifications/emergency_engine.py (EmergencyNotificationEngine).
+# Controls all three alert channels: desktop, email, and emergency contacts.
+#
+# Quick-start:
+#   1. Fill in email.sender_email / sender_password / recipient_email
+#   2. Set email.enabled: true
+#   3. Add at least one entry under contacts
+#   4. Restart Guardian Ear
+emergency:
+
+  # ── Email channel ────────────────────────────────────────────────────────
+  email:
+    sender_email: ""             # Gmail or other SMTP address that SENDS alerts
+    sender_password: ""          # App Password (for Gmail: myaccount.google.com → Security → App passwords)
+    recipient_email: ""          # Address that RECEIVES the emergency email
+    smtp_host: "smtp.gmail.com"  # SMTP server (change for Outlook: smtp-mail.outlook.com)
+    smtp_port: 587               # STARTTLS port (use 465 + SSL for some providers)
+    enabled: false               # Set true once credentials are configured
+
+  # ── Desktop notification channel ─────────────────────────────────────────
+  desktop:
+    enabled: true                # Show OS popup alerts (requires plyer or win10toast)
+    timeout_seconds: 10          # Seconds the notification remains visible
+
+  # ── Emergency contact escalation ─────────────────────────────────────────
+  # List one or more contacts. The first entry is the primary contact.
+  # Phone numbers are logged and passed to the future SMS/call integration.
+  contacts:
+    []                           # Example entry (uncomment and fill in):
+    # - name: "Security Desk"
+    #   phone: "+1-555-0199"
+    #   role: "primary"
+    # - name: "Campus Safety"
+    #   phone: "+1-555-0177"
+    #   role: "secondary"
+
+  # ── Dispatch settings ────────────────────────────────────────────────────
+  dispatch:
+    min_threat_score: 60         # Only dispatch when threat_score >= this value
+    cooldown_seconds: 30         # Minimum seconds between repeated dispatches
+                                 # for the same sound class (prevents alert storms)

@@ -176,8 +176,12 @@ if 'session_detection_count' not in st.session_state:
     st.session_state.session_detection_count = 0
 if 'session_peak_threat' not in st.session_state:
     st.session_state.session_peak_threat = 0
-if 'telegram_test_status' not in st.session_state:
-    st.session_state.telegram_test_status = None
+if 'emergency_test_status' not in st.session_state:
+    st.session_state.emergency_test_status = None
+if 'notification_log' not in st.session_state:
+    st.session_state.notification_log = []  # list of notification_record dicts
+if 'emergency_engine' not in st.session_state:
+    st.session_state.emergency_engine = None  # lazy-loaded on first use
 # Open-set classifier — created once per session, reads from config.yaml
 if 'open_set_clf' not in st.session_state:
     try:
@@ -187,7 +191,15 @@ if 'open_set_clf' not in st.session_state:
         st.session_state.open_set_clf = None
 
 
-
+def _get_emergency_engine():
+    """Lazy-load the EmergencyNotificationEngine (once per session)."""
+    if st.session_state.emergency_engine is None:
+        try:
+            from src.notifications.emergency_engine import from_config as _eng_from_config
+            st.session_state.emergency_engine = _eng_from_config()
+        except Exception:
+            pass
+    return st.session_state.emergency_engine
 
 # ─────────────────────────────────────────────────
 # MODEL LOADING
@@ -225,149 +237,146 @@ def load_normalization() -> Tuple[Optional[float], Optional[float]]:
 # ─────────────────────────────────────────────────
 # PRIORITY-BASED ACTION ENGINE & MOBILE DISPATCH
 # ─────────────────────────────────────────────────
-def send_telegram_alert(token: str, chat_id: str, message: str) -> bool:
-    """Send alert directly to a mobile device via Telegram Bot API (No external deps)."""
-    import urllib.request
-    import urllib.parse
-    import json
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "Markdown"
-    }
-    try:
-        data = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(
-            url, data=data, 
-            headers={'Content-Type': 'application/json'}
-        )
-        with urllib.request.urlopen(req, timeout=5) as response:
-            return response.status == 200
-    except Exception:
-        return False
-
-
 def process_priority_actions(sound_class: str, confidence: float, threat_score: float, threat_level: str) -> Optional[Dict[str, Any]]:
     """
     Decides and triggers emergency response actions based on threat priority tiers.
 
     Tiers:
-      TIER 5 (CRITICAL): gun_shot, siren, jackhammer, explosion, glass_breaking
-          Action: Immediate emergency dispatch + Telegram alert
+      TIER 5 (CRITICAL): gun_shot, siren, jackhammer, explosion, glass_breaking, fire_alarm
+          Action: Desktop notification + Email + Emergency Contact Escalation
       TIER 4 (GUARDIAN): children_playing, child_crying, elderly_distress
-          Action: Guardian SMS via Telegram
+          Action: Emergency contact notification + Desktop alert
       TIER 3 (HOME SAFETY): water_flow, drilling, gas_alarm
-          Action: Smart home warning + Telegram
+          Action: Dashboard warning + Desktop notification
       TIER 2 (LOW ALERT): dog_bark, engine_idling, car_horn
-          Action: Dashboard notification
+          Action: Dashboard notice only
       TIER 1 (AMBIENT): street_music, air_conditioner
-          Action: Log only (no notification)
+          Action: Log only
     """
-    if sound_class in ('silence', '', None):
+    if sound_class in ('silence', '', None, 'unknown'):
         return None
 
     action_type = "Log Only"
     details = ""
     triggered = False
-    telegram_classes = []  # classes that warrant Telegram push
+    fire_emergency_engine = False
 
-    # Load config values (deep copy — safe to mutate)
+    # Load emergency contact info from config
     try:
         from src.utils.config_loader import load_config
         config = load_config()
-        contacts = config.get('action_engine', {})
-        emergency_contact = contacts.get('emergency_contact', '+1-555-0199')
-        guardian_contact = contacts.get('guardian_contact', '+1-555-0177')
+        ec_cfg = config.get('emergency_contact', {})
+        contact_name = ec_cfg.get('name', 'Emergency Contact') or 'Emergency Contact'
+        contact_phone = ec_cfg.get('phone', 'Not configured') or 'Not configured'
     except Exception:
-        emergency_contact = '+1-555-0199'
-        guardian_contact = '+1-555-0177'
+        contact_name = 'Emergency Contact'
+        contact_phone = 'Not configured'
 
-    # Retrieve Telegram credentials from session_state
-    telegram_token = st.session_state.get('telegram_token', '') or os.environ.get('GUARDIAN_TELEGRAM_TOKEN', '')
-    telegram_chat_id = st.session_state.get('telegram_chat_id', '') or os.environ.get('GUARDIAN_TELEGRAM_CHAT_ID', '')
+    location = st.session_state.get('location_override', 'Hostel').replace('_', ' ').title()
 
-    # Action routing
+    # ── Action routing ─────────────────────────────────────────────────────────
     if sound_class in ('gun_shot', 'siren', 'jackhammer', 'explosion', 'glass_breaking', 'fire_alarm'):
-        action_type = "🚨 EMERGENCY CALL PLACED"
+        action_type = "🚨 EMERGENCY DISPATCHED"
         details = (
-            f"Alerting emergency services at {emergency_contact}. "
             f"CRITICAL threat: {sound_class.replace('_',' ').title()} "
-            f"detected @ {confidence*100:.1f}% confidence."
+            f"detected at {confidence*100:.1f}% confidence. "
+            f"Emergency contact notified. All alert channels fired."
         )
         triggered = True
-        telegram_classes = ['gun_shot', 'siren', 'jackhammer', 'explosion', 'glass_breaking', 'fire_alarm']
+        fire_emergency_engine = True
 
     elif sound_class in ('children_playing', 'child_crying', 'baby_crying', 'elderly_distress'):
-        action_type = "📧 GUARDIAN SMS SENT"
+        action_type = "📞 GUARDIAN CONTACT NOTIFIED"
         details = (
-            f"Alert sent to guardian at {guardian_contact}: "
-            f"'{sound_class.replace('_',' ').title()} patterns detected. Please check immediately.'"
+            f"Distress pattern: {sound_class.replace('_',' ').title()} detected. "
+            f"Emergency contact {contact_name} alerted."
         )
         triggered = True
-        telegram_classes = ['children_playing', 'child_crying', 'baby_crying', 'elderly_distress']
+        fire_emergency_engine = True
 
     elif sound_class in ('water_flow', 'drilling', 'gas_alarm', 'water_leakage'):
         action_type = "🚰 SMART HOME WARNING"
         details = (
             f"Home safety alert: {sound_class.replace('_',' ').title()} detected. "
-            f"Verify source and take corrective action immediately."
+            f"Verify source and take corrective action."
         )
         triggered = True
-        telegram_classes = ['water_flow', 'gas_alarm', 'water_leakage']
+        fire_emergency_engine = (threat_score >= 60)
 
     elif sound_class in ('dog_bark', 'engine_idling', 'car_horn'):
         action_type = "🔔 DASHBOARD NOTICE"
         details = f"Low-threat event: {sound_class.replace('_', ' ').title()} in vicinity."
         triggered = True
-        telegram_classes = []  # no Telegram for low-tier events
+        fire_emergency_engine = False
 
     elif sound_class in ('street_music', 'air_conditioner'):
         action_type = "📋 AMBIENT LOG"
         details = f"Ambient sound logged: {sound_class.replace('_', ' ').title()}."
-        triggered = False  # ambient — don't add to triggered_actions
+        triggered = False
 
     if triggered:
         action_record = {
             'timestamp': time.strftime('%H:%M:%S'),
+            'date': time.strftime('%Y-%m-%d'),
             'sound_class': sound_class,
             'threat_level': threat_level,
             'threat_score': threat_score,
             'action_type': action_type,
             'details': details,
+            'location': location,
+            'desktop_sent': False,
+            'email_sent': False,
+            'contact_name': contact_name,
+            'contact_phone': contact_phone,
+            'contact_status': 'NOT_CONFIGURED',
+            'notification_type': 'EMERGENCY' if fire_emergency_engine else 'INFO',
         }
+
         if 'triggered_actions' not in st.session_state:
             st.session_state.triggered_actions = []
 
         # Rate-limit: don't re-trigger same class within 5 seconds
-        last_action_time = getattr(st.session_state, 'last_action_time', 0)
+        last_action_time = st.session_state.get('last_action_time', 0)
         last_class = st.session_state.triggered_actions[0]['sound_class'] if st.session_state.triggered_actions else None
         cooldown_ok = (last_class != sound_class) or (time.time() - last_action_time > 5)
 
         if cooldown_ok:
+            # ── Fire Emergency Notification Engine in background thread ────────
+            if fire_emergency_engine:
+                import threading
+                def _fire_engine():
+                    try:
+                        eng = _get_emergency_engine()
+                        if eng:
+                            rec = eng.dispatch(
+                                sound_class=sound_class,
+                                confidence=confidence,
+                                threat_score=threat_score,
+                                threat_level=threat_level,
+                                location=location,
+                            )
+                            # Update action record with actual delivery status
+                            action_record.update({
+                                'desktop_sent': rec.get('desktop_sent', False),
+                                'email_sent': rec.get('email_sent', False),
+                                'contact_status': rec.get('contact_status', 'NOTIFIED'),
+                                'channels_fired': rec.get('channels_fired', []),
+                            })
+                            # Store in notification_log for Emergency Response Center
+                            st.session_state.notification_log.insert(0, rec)
+                            st.session_state.notification_log = st.session_state.notification_log[:100]
+                    except Exception:
+                        pass
+                threading.Thread(target=_fire_engine, daemon=True).start()
+
             st.session_state.triggered_actions.insert(0, action_record)
             st.session_state.triggered_actions = st.session_state.triggered_actions[:50]
             st.session_state.last_action_time = time.time()
 
-            if telegram_token and telegram_chat_id and sound_class in ['gun_shot', 'siren', 'jackhammer', 'children_playing', 'child_crying', 'water_flow']:
-                loc_label = st.session_state.get('location_override', 'Hostel').replace('_', ' ').title()
-                tg_msg = (
-                    f"⚠️ *GUARDIAN EAR ALERT* ⚠️\n\n"
-                    f"*Event:* {action_type}\n"
-                    f"*Sound:* {sound_class.replace('_',' ').title()}\n"
-                    f"*Location:* {loc_label}\n"
-                    f"*Threat Level:* {threat_level} ({threat_score}/100)\n\n"
-                    f"_{details}_"
-                )
-                import threading
-                threading.Thread(
-                    target=send_telegram_alert, 
-                    args=(telegram_token, telegram_chat_id, tg_msg), 
-                    daemon=True
-                ).start()
-
             return action_record
     return None
+
+
 
 
 # ─────────────────────────────────────────────────
@@ -531,6 +540,7 @@ def render_sidebar():
     page = st.sidebar.radio("Go to", [
         "🏠 Live Detection",
         "♿ Assistive Hearing Mode",
+        "🚨 Emergency Response Center",
         "📋 Alert History",
         "📊 Feature Visualization",
         "🧠 System Info",
@@ -552,25 +562,6 @@ def render_sidebar():
         ])
 
     st.sidebar.divider()
-    st.sidebar.subheader("\U0001f4f1 Mobile Alerts \u2014 Telegram")
-    telegram_token = st.sidebar.text_input(
-        "Bot Token",
-        value=st.session_state.get('telegram_token', os.environ.get('GUARDIAN_TELEGRAM_TOKEN', '')),
-        type="password",
-        help="Get from @BotFather on Telegram"
-    )
-    telegram_chat_id = st.sidebar.text_input(
-        "Chat ID",
-        value=st.session_state.get('telegram_chat_id', os.environ.get('GUARDIAN_TELEGRAM_CHAT_ID', '')),
-        help="Get from @userinfobot on Telegram"
-    )
-    if telegram_token != st.session_state.get('telegram_token', ''):
-        st.session_state.telegram_token = telegram_token
-        st.session_state.telegram_test_status = None
-    if telegram_chat_id != st.session_state.get('telegram_chat_id', ''):
-        st.session_state.telegram_chat_id = telegram_chat_id
-        st.session_state.telegram_test_status = None
-
     tg_configured = bool(telegram_token and telegram_chat_id)
     if tg_configured:
         st.sidebar.success("\U0001f7e2 Telegram: Configured")
@@ -1555,7 +1546,155 @@ def page_system_info(model):
 
 
 # ─────────────────────────────────────────────────
-# MAIN
+# EMERGENCY RESPONSE CENTER PAGE
+# ─────────────────────────────────────────────────
+def page_emergency_response_center():
+    """Emergency Response Center — notification channels, escalation log, contact status."""
+    st.markdown("<div class='main-title'>\U0001f6a8 Emergency Response Center</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='subtitle'>Notification Engine \u00b7 Escalation Log \u00b7 Contact Management</div>",
+        unsafe_allow_html=True,
+    )
+    st.divider()
+
+    # ── Channel Status Row ──────────────────────────────────────────────────
+    st.subheader("\U0001f514 Alert Channel Status")
+    eng = _get_emergency_engine()
+
+    c1, c2, c3, c4 = st.columns(4)
+    _ec_name = st.session_state.get('ec_name', '')
+    _ec_phone = st.session_state.get('ec_phone', '')
+    _ec_email = st.session_state.get('ec_email', '')
+
+    desktop_available = False
+    email_configured = False
+    contact_configured = bool(_ec_name or _ec_phone)
+
+    try:
+        from src.notifications.desktop_notifier import DesktopNotifier
+        desktop_available = DesktopNotifier().is_available()
+    except Exception:
+        pass
+
+    if eng:
+        email_configured = eng.is_email_configured()
+        contact_configured = eng.is_contact_configured() or contact_configured
+
+    c1.metric("\U0001f5a5\ufe0f Desktop", "ACTIVE" if desktop_available else "FALLBACK")
+    c2.metric("\U0001f4e7 Email", "CONFIGURED" if email_configured else "NOT SET")
+    c3.metric("\U0001f4de Contact", "READY" if contact_configured else "NOT SET")
+    c4.metric("\U0001f4e8 Notifications Sent", len(st.session_state.get('notification_log', [])))
+
+    st.divider()
+
+    # ── Emergency Contact Card ──────────────────────────────────────────────
+    st.subheader("\U0001f464 Emergency Contact Information")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if _ec_name or _ec_phone or _ec_email:
+            st.markdown(
+                f"<div style='background:linear-gradient(135deg,#0f3460,#16213e);"
+                f"border-left:4px solid #e94560;padding:16px 20px;"
+                f"border-radius:12px;margin-bottom:16px;'>"
+                f"<b style='color:#e94560;font-size:1.1rem;'>\U0001f4de {_ec_name or 'Contact'}</b><br/>"
+                f"<span style='color:#a8b2d8;'>\U0001f4f1 {_ec_phone or 'No phone'}</span><br/>"
+                f"<span style='color:#a8b2d8;'>\U0001f4e7 {_ec_email or 'No email'}</span><br/>"
+                f"<span style='color:#4ade80;font-size:0.9rem;'>\U0001f7e2 Escalation Ready</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.warning("No emergency contact configured. Add contact details in the sidebar.")
+    with col_b:
+        st.markdown("**\U0001f6a8 Future Integration Path**")
+        st.markdown(
+            "- \U0001f4f1 **SMS** via Twilio / MSG91\n"
+            "- \U0001f4de **Voice Call** via Google Voice API\n"
+            "- \U0001f4ac **WhatsApp** via Meta Business API\n"
+            "- \U0001f4f2 **Mobile Push** via Firebase FCM"
+        )
+
+    st.divider()
+
+    # ── Live Test Panel ─────────────────────────────────────────────────────
+    st.subheader("\U0001f9ea Live Test Emergency Alert")
+    col_t1, col_t2 = st.columns([2, 1])
+    with col_t1:
+        test_sound = st.selectbox("Simulate Sound", [
+            "gun_shot", "siren", "jackhammer", "children_playing", "dog_bark"
+        ], key="erc_test_sound")
+        test_conf = st.slider("Confidence", 50, 100, 95, key="erc_test_conf") / 100.0
+        test_loc = st.selectbox("Location", LOCATIONS, key="erc_test_loc")
+    with col_t2:
+        st.markdown("<br/>", unsafe_allow_html=True)
+        if st.button("\U0001f9ea Fire Test Alert", key="erc_fire_btn", type="primary"):
+            import threading
+            result_holder = {}
+            def _test_dispatch():
+                try:
+                    e = _get_emergency_engine()
+                    if e:
+                        rec = e.dispatch(
+                            sound_class=test_sound,
+                            confidence=test_conf,
+                            threat_score=85.0,
+                            threat_level="CRITICAL",
+                            location=test_loc.replace('_',' ').title(),
+                        )
+                        st.session_state.notification_log.insert(0, rec)
+                        st.session_state.notification_log = st.session_state.notification_log[:100]
+                except Exception:
+                    pass
+            threading.Thread(target=_test_dispatch, daemon=True).start()
+            st.success("\u2705 Test alert dispatched! Desktop notification should appear momentarily.")
+
+    st.divider()
+
+    # ── Notification Log ───────────────────────────────────────────────────
+    st.subheader("\U0001f4cb Emergency Escalation Log")
+    notif_log = st.session_state.get('notification_log', [])
+
+    if notif_log:
+        for rec in notif_log[:20]:
+            _sc = rec.get('sound_class', '?').replace('_',' ').title()
+            _tl = rec.get('threat_level', 'UNKNOWN')
+            _ts = rec.get('timestamp', '?')
+            _cname = rec.get('contact_name', 'N/A')
+            _cstatus = rec.get('contact_status', 'N/A')
+            _desktop = rec.get('desktop_sent', False)
+            _email = rec.get('email_sent', False)
+            _color = '#ef4444' if _tl == 'CRITICAL' else '#f59e0b' if _tl == 'HIGH' else '#3b82f6'
+            _desktop_icon = "✓" if _desktop else "✗"
+            _email_icon = "✓" if _email else "✗"
+            _html_card = (
+                f"<div style='background:#0f172a;border-left:4px solid {_color};"
+                f"padding:10px 16px;border-radius:8px;margin-bottom:8px;'>"
+                f"<b style='color:{_color};'>{_sc}</b> "
+                f"<span style='color:#94a3b8;font-size:0.85rem;'>{_tl} \u00b7 {_ts}</span><br/>"
+                f"<span style='color:#64748b;font-size:0.82rem;'>"
+                f"\U0001f464 {_cname} \u2014 {_cstatus}&nbsp;&nbsp;"
+                f"\U0001f5a5\ufe0f {_desktop_icon} Desktop&nbsp;"
+                f"\U0001f4e7 {_email_icon} Email"
+                "</span></div>"
+            )
+            st.markdown(_html_card, unsafe_allow_html=True)
+
+    else:
+        st.info("\U0001f4ec No emergency escalations yet. Alerts will appear here when a critical threat is detected.")
+
+    # ── Also show triggered_actions as overview ─────────────────────────────
+    triggered = st.session_state.get('triggered_actions', [])
+    if triggered:
+        st.divider()
+        st.subheader("\U0001f4cb Action Dispatch Log (Current Session)")
+        action_df = pd.DataFrame(triggered)[[
+            'timestamp', 'sound_class', 'threat_level', 'threat_score', 'action_type', 'notification_type'
+        ] if 'notification_type' in triggered[0] else [
+            'timestamp', 'sound_class', 'threat_level', 'threat_score', 'action_type'
+        ]]
+        st.dataframe(action_df, use_container_width=True)
+
+
 # ─────────────────────────────────────────────────
 def main():
     """Main application entry point."""
@@ -1567,6 +1706,8 @@ def main():
         page_live_detection(model, location, threshold, X_min, X_max, sim_sound)
     elif page == "♿ Assistive Hearing Mode":
         page_assistive_hearing_mode(model, location, threshold, X_min, X_max, sim_sound)
+    elif page == "🚨 Emergency Response Center":
+        page_emergency_response_center()
     elif page == "📋 Alert History":
         page_alert_history()
     elif page == "📊 Feature Visualization":
