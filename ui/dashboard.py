@@ -201,6 +201,38 @@ def _get_emergency_engine():
             pass
     return st.session_state.emergency_engine
 
+def _save_emergency_config(name: str, phone: str, email: str):
+    """Save emergency contact info back to configs/config.yaml."""
+    config_path = Path("configs/config.yaml")
+    if not config_path.exists():
+        return False
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        
+        # Ensure dicts exist
+        if "emergency" not in cfg:
+            cfg["emergency"] = {}
+        if "contacts" not in cfg["emergency"]:
+            cfg["emergency"]["contacts"] = [{}]
+        elif not cfg["emergency"]["contacts"]:
+            cfg["emergency"]["contacts"].append({})
+            
+        cfg["emergency"]["contacts"][0]["name"] = name
+        cfg["emergency"]["contacts"][0]["phone"] = phone
+        cfg["emergency"]["contacts"][0]["email"] = email
+        
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+        
+        # Force re-initialization of engine
+        from src.notifications.emergency_engine import from_config
+        st.session_state.emergency_engine = from_config(cfg)
+        return True
+    except Exception as e:
+        print(f"Error saving config: {e}")
+        return False
+
 # ─────────────────────────────────────────────────
 # MODEL LOADING
 # ─────────────────────────────────────────────────
@@ -237,7 +269,7 @@ def load_normalization() -> Tuple[Optional[float], Optional[float]]:
 # ─────────────────────────────────────────────────
 # PRIORITY-BASED ACTION ENGINE & MOBILE DISPATCH
 # ─────────────────────────────────────────────────
-def process_priority_actions(sound_class: str, confidence: float, threat_score: float, threat_level: str) -> Optional[Dict[str, Any]]:
+def process_priority_actions(sound_class: str, confidence: float, threat_score: float, threat_level: str, open_set_status: str = "KNOWN", vote_count: int = 1) -> Optional[Dict[str, Any]]:
     """
     Decides and triggers emergency response actions based on threat priority tiers.
 
@@ -354,6 +386,8 @@ def process_priority_actions(sound_class: str, confidence: float, threat_score: 
                                 threat_score=threat_score,
                                 threat_level=threat_level,
                                 location=location,
+                                open_set_status=open_set_status,
+                                vote_count=vote_count,
                             )
                             # Update action record with actual delivery status
                             action_record.update({
@@ -591,6 +625,12 @@ def render_sidebar():
         if ec_email_val != st.session_state.get('ec_email', ''):
             st.session_state.ec_email = ec_email_val
 
+        if st.button("💾 Save Configuration", use_container_width=True):
+            if _save_emergency_config(ec_name, ec_phone, ec_email_val):
+                st.success("Config saved!")
+            else:
+                st.error("Failed to save.")
+
     # ── Alert Channel Status ───────────────────────────────────────────
     with st.sidebar.expander("\U0001f514 Alert Channels", expanded=True):
         desktop_on = st.checkbox("\U0001f5a5\ufe0f Desktop Notifications", value=True, key="chk_desktop")
@@ -603,6 +643,7 @@ def render_sidebar():
         )
 
     # ── Test Button ────────────────────────────────────────────────────
+    _test_result = st.session_state.get('emergency_test_status')
     if st.sidebar.button("\U0001f9ea Send Test Emergency Alert", key="emergency_test_btn", type="primary"):
         try:
             eng = _get_emergency_engine()
@@ -613,14 +654,35 @@ def render_sidebar():
                 st.session_state.emergency_test_status = {'error': 'Engine not available'}
         except Exception as _err:
             st.session_state.emergency_test_status = {'error': str(_err)}
+        st.rerun()
 
-    _test_result = st.session_state.get('emergency_test_status')
     if _test_result:
         if isinstance(_test_result, dict) and 'error' not in _test_result:
             _desktop = _test_result.get('desktop', False)
             st.sidebar.success(f"\u2705 Test fired! Desktop: {'✓' if _desktop else '✗'}")
         elif isinstance(_test_result, dict):
             st.sidebar.error(f"\u274c {_test_result.get('error', 'Unknown error')}")
+        st.session_state.emergency_test_status = None
+
+    if st.sidebar.button("\U0001f4e7 Send Test Email", key="email_test_btn", use_container_width=True):
+        try:
+            st.session_state.email_success_count = st.session_state.get('email_success_count', 0)
+            st.session_state.email_failure_count = st.session_state.get('email_failure_count', 0)
+            eng = _get_emergency_engine()
+            if eng and eng._email.is_configured():
+                success = eng._email.send_test_email()
+                if success:
+                    st.session_state.email_success_count += 1
+                    st.session_state.last_email_sent = time.strftime("%H:%M:%S")
+                    st.sidebar.success("✅ Test email delivered!")
+                else:
+                    st.session_state.email_failure_count += 1
+                    st.sidebar.error("❌ Email failed.")
+            else:
+                st.sidebar.error("❌ Email SMTP not configured.")
+        except Exception as _err:
+            st.session_state.email_failure_count += 1
+            st.sidebar.error(f"❌ Error: {str(_err)}")
 
     st.sidebar.divider()
     # Live session statistics
@@ -1038,7 +1100,13 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                             # Only trigger actions when voted + above threshold
                             if c_name not in ('silence', 'child_crying', 'water_flow', 'unknown') and \
                                conf >= conf_threshold_val and voted:
-                                process_priority_actions(c_name, conf, threat_score, threat_level)
+                                osc_res = latest.get('osc_result', {})
+                                is_known = osc_res.get('is_known', True) if isinstance(osc_res, dict) else True
+                                o_status = "KNOWN" if is_known else "UNKNOWN"
+                                process_priority_actions(
+                                    c_name, conf, threat_score, threat_level,
+                                    open_set_status=o_status, vote_count=consecutive
+                                )
 
                             # ── Open-Set Rejection UI (Live Mode) ─────────────────
                             osc_res = latest.get('osc_result')
@@ -1558,7 +1626,7 @@ def page_system_info(model):
     b_col1, b_col2 = st.columns(2)
     with b_col1:
         st.write("**Size Comparison (Lower is Better)**")
-        st.bar_chart(benchmark_df.set_index('Model Format')['Model Size (MB)'])
+        st.bar_chart(benchmark_df.set_index('Model Format')['Size (MB)'])
     with b_col2:
         st.write("**Inference Latency on Pi 4 (Lower is Better)**")
         st.bar_chart(benchmark_df.set_index('Model Format')['Inference Latency (ms)'])
@@ -1600,6 +1668,9 @@ def page_emergency_response_center():
     eng = _get_emergency_engine()
 
     c1, c2, c3, c4 = st.columns(4)
+    st.session_state.email_success_count = st.session_state.get('email_success_count', 0)
+    st.session_state.email_failure_count = st.session_state.get('email_failure_count', 0)
+    st.session_state.last_email_sent = st.session_state.get('last_email_sent', 'Never')
     _ec_name = st.session_state.get('ec_name', '')
     _ec_phone = st.session_state.get('ec_phone', '')
     _ec_email = st.session_state.get('ec_email', '')
@@ -1622,6 +1693,15 @@ def page_emergency_response_center():
     c2.metric("\U0001f4e7 Email", "CONFIGURED" if email_configured else "NOT SET")
     c3.metric("\U0001f4de Contact", "READY" if contact_configured else "NOT SET")
     c4.metric("\U0001f4e8 Notifications Sent", len(st.session_state.get('notification_log', [])))
+
+    st.divider()
+    
+    st.subheader("\U0001f4ca Email Delivery Metrics")
+    e1, e2, e3, e4 = st.columns(4)
+    e1.metric("Status", "ACTIVE" if email_configured else "DISABLED")
+    e2.metric("Last Sent", st.session_state.get('last_email_sent', 'Never'))
+    e3.metric("Success Count", st.session_state.get('email_success_count', 0))
+    e4.metric("Failure Count", st.session_state.get('email_failure_count', 0))
 
     st.divider()
 
@@ -1678,6 +1758,8 @@ def page_emergency_response_center():
                             threat_score=85.0,
                             threat_level="CRITICAL",
                             location=test_loc.replace('_',' ').title(),
+                            open_set_status="KNOWN",
+                            vote_count=1,
                         )
                         st.session_state.notification_log.insert(0, rec)
                         st.session_state.notification_log = st.session_state.notification_log[:100]

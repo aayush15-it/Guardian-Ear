@@ -32,8 +32,11 @@ from __future__ import annotations
 
 import logging
 import time
+import csv
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 
 # ─── Logger (graceful fallback) ───────────────────────────────────────────────
 try:
@@ -67,6 +70,9 @@ class EmergencyNotificationEngine:
         self._cfg = self._resolve_config(config)
         self._desktop = DesktopNotifier()
         self._email = self._build_email_service()
+        self._last_email_time: Dict[str, float] = {}
+        self._email_cooldown = self._cfg.get("dispatch", {}).get("cooldown_seconds", 60)
+        
         logger.info(
             "EmergencyNotificationEngine ready — "
             "desktop=%s | email=%s | contact=%s",
@@ -126,6 +132,8 @@ class EmergencyNotificationEngine:
         threat_score: float,
         threat_level: str,
         location: str,
+        open_set_status: str = "KNOWN",
+        vote_count: int = 1,
     ) -> Dict[str, Any]:
         """Fire all notification channels and return a consolidated record.
 
@@ -135,6 +143,8 @@ class EmergencyNotificationEngine:
             threat_score: Computed threat score (0-100).
             threat_level: Human-readable level string (e.g. ``'CRITICAL'``).
             location:     Deployment location string.
+            open_set_status: Result of open-set rejection ('KNOWN' or 'UNKNOWN').
+            vote_count:   Number of consecutive temporal votes.
 
         Returns:
             A ``notification_record`` dict containing status of every channel.
@@ -202,7 +212,13 @@ class EmergencyNotificationEngine:
             "contact_status": contact_record.get("contact_status", "NOT_CONFIGURED"),
             "channels_fired": channels_fired,
             "notification_type": "EMERGENCY",
+            "open_set_status": open_set_status,
+            "vote_count": vote_count,
+            "delivery_status": "SUCCESS" if channels_fired else "FAILED",
+            "recipient": contact_record.get("contact_email", "") or contact_record.get("contact_phone", "None"),
         }
+
+        self._log_to_csv(notification_record)
 
         logger.info(
             "Dispatch complete — channels fired: %s",
@@ -249,13 +265,20 @@ class EmergencyNotificationEngine:
     ) -> bool:
         """Attempt to send an SMTP email alert.
 
-        Silently skips if email is not configured.
+        Silently skips if email is not configured or if rate limited.
 
         Returns:
             ``True`` if email was delivered, ``False`` otherwise.
         """
         if not self._email.is_configured():
             logger.debug("Email channel skipped — not configured.")
+            return False
+
+        # Apply rate limiting to prevent alert storms
+        now = time.time()
+        last_time = self._last_email_time.get(sound_class, 0)
+        if now - last_time < self._email_cooldown:
+            logger.warning("Email rate limited for %s (cooldown active)", sound_class)
             return False
 
         subject = (
@@ -265,7 +288,7 @@ class EmergencyNotificationEngine:
         timestamp_str = datetime.now().strftime("%H:%M:%S")
 
         try:
-            return self._email.send_alert(
+            success = self._email.send_alert(
                 subject=subject,
                 sound_class=sound_class,
                 confidence=confidence,
@@ -274,6 +297,9 @@ class EmergencyNotificationEngine:
                 location=location,
                 timestamp=timestamp_str,
             )
+            if success:
+                self._last_email_time[sound_class] = now
+            return success
         except Exception as exc:
             logger.error("Unexpected error in email notification channel: %s", exc)
             return False
@@ -297,17 +323,24 @@ class EmergencyNotificationEngine:
         contacts: List[Dict[str, str]] = self._cfg.get("contacts", [])
 
         if not contacts:
-            logger.debug("Contact escalation skipped — no contacts configured.")
-            return {
-                "contact_name": "",
-                "contact_phone": "",
-                "contact_status": "NOT_CONFIGURED",
-            }
+            # Fallback to older emergency_contact structure if contacts list isn't present
+            legacy = self._cfg.get("emergency_contact", {})
+            if legacy.get("name") or legacy.get("phone"):
+                contacts = [legacy]
+            else:
+                logger.debug("Contact escalation skipped — no contacts configured.")
+                return {
+                    "contact_name": "",
+                    "contact_phone": "",
+                    "contact_email": "",
+                    "contact_status": "NOT_CONFIGURED",
+                }
 
         # Use the first configured contact as the primary escalation target
         primary = contacts[0]
         name = primary.get("name", "Emergency Contact")
         phone = primary.get("phone", "")
+        email_addr = primary.get("email", "")
 
         logger.warning(
             "CONTACT ESCALATION → %s (%s) | %s | %.1f%% confidence | score=%.0f",
@@ -331,6 +364,7 @@ class EmergencyNotificationEngine:
         return {
             "contact_name": name,
             "contact_phone": phone,
+            "contact_email": email_addr,
             "contact_status": "NOTIFIED",
         }
 
@@ -380,6 +414,59 @@ class EmergencyNotificationEngine:
 
         logger.info("Test alert results: %s", results)
         return results
+
+    # ─── Enterprise Expansion Stubs ───────────────────────────────────────────
+
+    def _fire_teams_webhook(self, alert_data: Dict[str, Any]) -> bool:
+        """Future Scope: Send adaptive card to Microsoft Teams."""
+        # TODO: Implement requests.post(webhook_url, json=card_payload)
+        return False
+
+    def _fire_slack_webhook(self, alert_data: Dict[str, Any]) -> bool:
+        """Future Scope: Send block kit message to Slack."""
+        # TODO: Implement slack_sdk.WebClient.chat_postMessage
+        return False
+
+    def _fire_sms_gateway(self, alert_data: Dict[str, Any], phone: str) -> bool:
+        """Future Scope: Send SMS via Twilio or MSG91."""
+        # TODO: Implement Twilio Client
+        return False
+
+    def _fire_voice_call(self, alert_data: Dict[str, Any], phone: str) -> bool:
+        """Future Scope: Trigger automated voice call via Google Voice / Twilio API."""
+        # TODO: Implement TwiML voice synthesis
+        return False
+
+    # ─── Audit Logging ────────────────────────────────────────────────────────
+    
+    def _log_to_csv(self, record: Dict[str, Any]) -> None:
+        """Save a persistent audit trail of the notification dispatch."""
+        try:
+            path = Path("alerts/notification_logs.csv")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Prepare row matching Enterprise Requirements
+            row = {
+                "timestamp": f"{record.get('date')} {record.get('timestamp')}",
+                "sound_class": record.get("sound_class"),
+                "confidence": record.get("confidence"),
+                "threat_level": record.get("threat_level"),
+                "location": record.get("location"),
+                "notification_type": "|".join(record.get("channels_fired", [])),
+                "recipient": record.get("recipient"),
+                "delivery_status": record.get("delivery_status"),
+                "open_set_status": record.get("open_set_status"),
+                "vote_count": record.get("vote_count"),
+            }
+            
+            file_exists = path.exists()
+            with open(path, mode="a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerow(row)
+        except Exception as exc:
+            logger.error("Failed to write to notification_logs.csv: %s", exc)
 
 
 # ─── Module-level factory ─────────────────────────────────────────────────────
