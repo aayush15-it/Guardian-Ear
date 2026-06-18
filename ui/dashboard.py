@@ -1575,81 +1575,118 @@ def page_feature_visualization():
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-
 # ─────────────────────────────────────────────────
-# PAGE 4 — SYSTEM INFO
+# PAGE — SYSTEM INFO (PROJECT OVERVIEW)
 # ─────────────────────────────────────────────────
 def page_system_info(model):
-    """Render the system information page."""
-    st.title("🧠 System Information")
-
-    # Privacy & Safety Consent Panel
-    st.info(
-        "🔒 **Privacy & Data Security Policy:**\n\n"
-        "To ensure total privacy and safety, Guardian Ear executes all DSP features and neural model "
-        "inference **100% locally on the device** (offline on-device edge AI). "
-        "No raw audio bytes are sent over the internet or logged permanently. "
-        "The microphone input is cached in a volatile RAM-only buffer (`collections.deque`) and is continuously "
-        "overwritten every 3 seconds to guarantee that no local acoustic data is retained on disk."
-    )
-
-    st.subheader("Model Details")
-    if model is not None:
-        i1, i2, i3 = st.columns(3)
-        i1.metric("Model", "Attention-CRNN v2")
-        i2.metric("Input", str(model.input_shape[1:]))
-        i3.metric("Classes", str(NUM_CLASSES))
-
-        st.write("**Architecture:**")
-        layer_info = [
-            {'Layer': l.name, 'Type': l.__class__.__name__, 'Output': str(l.output_shape)}
-            for l in model.layers
-        ]
-        st.dataframe(pd.DataFrame(layer_info), use_container_width=True)
-    else:
-        st.warning("Model not loaded.")
-
-    st.divider()
-
-    # Edge AI benchmarks section
-    st.subheader("⚡ Edge AI & Lightweight Execution Benchmarks")
+    """Render the simplified, presentation-safe Project Overview page."""
+    st.markdown("<div class='main-title'>\u2139\ufe0f Project Overview</div>", unsafe_allow_html=True)
     st.markdown(
-        "Evaluates performance benchmarks of model optimization formats when deployed on a low-cost, low-power **Raspberry Pi 4 (Quad-core ARM Cortex-A72)**:"
+        "<div class='subtitle'>Guardian Ear \u00b7 AI-Based Environmental Awareness & Emergency Response System</div>",
+        unsafe_allow_html=True,
     )
-    
-    benchmark_df = pd.DataFrame({
-        'Model Format': ['Keras H5 (Baseline)', 'ONNX Runtime (FP32)', 'TFLite (INT8 Quantized)'],
-        'Model Size (MB)': [18.1, 12.2, 4.2],
-        'Inference Latency (ms)': [350.0, 110.0, 35.0]
-    })
-    
-    b_col1, b_col2 = st.columns(2)
-    with b_col1:
-        st.write("**Size Comparison (Lower is Better)**")
-        st.bar_chart(benchmark_df.set_index('Model Format')['Size (MB)'])
-    with b_col2:
-        st.write("**Inference Latency on Pi 4 (Lower is Better)**")
-        st.bar_chart(benchmark_df.set_index('Model Format')['Inference Latency (ms)'])
+    st.divider()
 
-    st.dataframe(benchmark_df, use_container_width=True)
+    # Row 1: Core Project Metrics
+    st.subheader("\U0001f4cc Project Identity")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Project", "Guardian Ear")
+    col2.metric("Model", "Attention-CRNN v2")
+    col3.metric("Dataset", "UrbanSound8K")
+    col4.metric("Sound Classes", "10")
+    col5.metric("Input Shape", "(180 x 130 x 1)")
 
     st.divider()
 
-    st.subheader("🔊 Dual Mode Classification")
-    mode_data = [
-        {'Sound': c, 'Mode': get_sound_mode(c), 'Description': get_mode_description(c)}
-        for c in CLASS_NAMES
-    ]
-    st.dataframe(pd.DataFrame(mode_data), use_container_width=True)
+    # Row 2: Feature Extraction & Detection Modes
+    r2a, r2b = st.columns(2)
+
+    with r2a:
+        st.subheader("\U0001f52c Feature Extraction Methods")
+        st.markdown(
+            "| Feature | Description |\n"
+            "|---|---|\n"
+            "| **MFCC** | 40 Mel-Frequency Cepstral Coefficients |\n"
+            "| **Mel Spectrogram** | 128 Mel-scale frequency bins |\n"
+            "| **Chroma STFT** | 12 pitch class features |\n"
+        )
+
+    with r2b:
+        st.subheader("\U0001f39b\ufe0f Detection Modes")
+        st.markdown(
+            "| Mode | Purpose |\n"
+            "|---|---|\n"
+            "| **Live Detection** | Real-time microphone surveillance with threat scoring |\n"
+            "| **Assistive Hearing** | Aids deaf/hard-of-hearing users with contextual alerts |\n"
+            "| **Demo Upload Mode** | Classify pre-recorded WAV/MP3 files for testing |\n"
+        )
 
     st.divider()
 
-    st.subheader("🛠️ Tech Stack")
-    st.table(pd.DataFrame({
-        'Component': ['Audio DSP', 'Deep Learning', 'Dashboard', 'Edge Deploy', 'API', 'Dataset', 'Explainability'],
-        'Technology': ['Librosa 0.10', 'TensorFlow/Keras 2.13', 'Streamlit', 'TFLite + ONNX', 'FastAPI', 'UrbanSound8K', 'Grad-CAM'],
-    }))
+    # Row 3: Advanced AI Features
+    st.subheader("\U0001f916 Advanced AI & Safety Features")
+    f1, f2, f3 = st.columns(3)
 
+    with f1:
+        st.markdown(
+            "**Open-Set Recognition**\n\n"
+            "Prevents unknown sounds from generating false alerts. "
+            "Uses entropy thresholding + top-2 margin gating.\n\n"
+            "**Temporal Voting**\n\n"
+            "Requires consistent predictions across 3 of 5 consecutive frames before raising an alert."
+        )
+    with f2:
+        st.markdown(
+            "**Context-Aware Threat Scoring**\n\n"
+            "Multi-factor threat score (0-100) based on model confidence, time of day, "
+            "location sensitivity, sound type risk, and temporal pattern.\n\n"
+            "**Grad-CAM Explainability**\n\n"
+            "Heatmaps over the Mel Spectrogram show which frequency bands drove the decision."
+        )
+    with f3:
+        st.markdown(
+            "**Emergency Response Center**\n\n"
+            "Real-time notification dispatch via desktop alerts and email. "
+            "Rate-limited with 60-second cooldown protection.\n\n"
+            "**CSV Audit Trail**\n\n"
+            "Every dispatch logged to `alerts/notification_logs.csv` with open-set status and vote count."
+        )
+
+    st.divider()
+
+    # Row 4: Deployment Readiness
+    st.subheader("\U0001f680 Deployment Readiness")
+    d1, d2 = st.columns(2)
+
+    with d1:
+        st.markdown(
+            "| Deployment Target | Status |\n"
+            "|---|---|\n"
+            "| Desktop (Windows/Linux/Mac) | Ready |\n"
+            "| Docker Container | Dockerfile included |\n"
+            "| FastAPI REST API | Integrated |\n"
+            "| Edge Device (Raspberry Pi 4) | TFLite Ready |\n"
+            "| TensorFlow Lite (INT8) | Model exported |\n"
+            "| ONNX Runtime | Model exported |\n"
+        )
+    with d2:
+        st.markdown(
+            "| Future Integration | Path |\n"
+            "|---|---|\n"
+            "| SMS Alerts | Twilio / MSG91 |\n"
+            "| Voice Calls | Twilio TwiML |\n"
+            "| Microsoft Teams | Adaptive Card Webhook |\n"
+            "| Slack | Block Kit Webhook |\n"
+            "| Mobile Push | Firebase FCM |\n"
+        )
+
+    st.divider()
+
+    st.info(
+        "\U0001f512 **Privacy & Data Security:** Guardian Ear runs 100% locally on-device. "
+        "No audio is transmitted over the internet. "
+        "Microphone input is held in a volatile in-memory buffer and overwritten every 3 seconds."
+    )
 
 # ─────────────────────────────────────────────────
 # EMERGENCY RESPONSE CENTER PAGE
