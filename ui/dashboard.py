@@ -190,6 +190,34 @@ if 'open_set_clf' not in st.session_state:
     except Exception:
         st.session_state.open_set_clf = None
 
+# ── Hydrate SMTP + Contact settings from config.yaml on first load ────────────
+if 'smtp_sender' not in st.session_state:
+    try:
+        import yaml as _yaml
+        _cfg_path = Path("configs/config.yaml")
+        if _cfg_path.exists():
+            _full = _yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
+            _em = _full.get("emergency", {})
+            _ec = _em.get("contacts", [{}])[0] if _em.get("contacts") else {}
+            _email_cfg = _em.get("email", {})
+            st.session_state.smtp_sender = _email_cfg.get("sender_email", "")
+            st.session_state.smtp_password = _email_cfg.get("sender_password", "")
+            st.session_state.smtp_host = _email_cfg.get("smtp_host", "smtp.gmail.com")
+            st.session_state.smtp_port = int(_email_cfg.get("smtp_port", 587))
+            st.session_state.ec_name = _ec.get("name", "")
+            st.session_state.ec_phone = _ec.get("phone", "")
+            st.session_state.ec_email = _ec.get("email", "")
+        else:
+            st.session_state.smtp_sender = ""
+            st.session_state.smtp_password = ""
+            st.session_state.smtp_host = "smtp.gmail.com"
+            st.session_state.smtp_port = 587
+    except Exception:
+        st.session_state.smtp_sender = ""
+        st.session_state.smtp_password = ""
+        st.session_state.smtp_host = "smtp.gmail.com"
+        st.session_state.smtp_port = 587
+
 
 def _get_emergency_engine():
     """Lazy-load the EmergencyNotificationEngine (once per session)."""
@@ -201,37 +229,64 @@ def _get_emergency_engine():
             pass
     return st.session_state.emergency_engine
 
-def _save_emergency_config(name: str, phone: str, email: str):
-    """Save emergency contact info back to configs/config.yaml."""
+def _save_emergency_config(
+    name: str, phone: str, email: str,
+    smtp_sender: str = "", smtp_password: str = "",
+    smtp_host: str = "smtp.gmail.com", smtp_port: int = 587,
+    smtp_enabled: bool = False,
+) -> tuple:
+    """Save emergency contact AND SMTP credentials to configs/config.yaml.
+    
+    Returns:
+        (success: bool, message: str)
+    """
     config_path = Path("configs/config.yaml")
     if not config_path.exists():
-        return False
+        return False, "configs/config.yaml not found."
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
         
-        # Ensure dicts exist
+        # Ensure emergency dict exists
         if "emergency" not in cfg:
             cfg["emergency"] = {}
-        if "contacts" not in cfg["emergency"]:
+        
+        # ── Save emergency contact ────────────────────────────────────────
+        if "contacts" not in cfg["emergency"] or not cfg["emergency"]["contacts"]:
             cfg["emergency"]["contacts"] = [{}]
-        elif not cfg["emergency"]["contacts"]:
-            cfg["emergency"]["contacts"].append({})
-            
         cfg["emergency"]["contacts"][0]["name"] = name
         cfg["emergency"]["contacts"][0]["phone"] = phone
         cfg["emergency"]["contacts"][0]["email"] = email
         
+        # ── Save SMTP email credentials ───────────────────────────────────
+        if "email" not in cfg["emergency"]:
+            cfg["emergency"]["email"] = {}
+        cfg["emergency"]["email"]["sender_email"] = smtp_sender.strip()
+        cfg["emergency"]["email"]["sender_password"] = smtp_password
+        cfg["emergency"]["email"]["recipient_email"] = email.strip()  # alert goes to emergency contact
+        cfg["emergency"]["email"]["smtp_host"] = smtp_host
+        cfg["emergency"]["email"]["smtp_port"] = smtp_port
+        # Only auto-enable if all three required fields are present
+        auto_enable = bool(smtp_sender.strip() and smtp_password and email.strip())
+        cfg["emergency"]["email"]["enabled"] = auto_enable
+        
         with open(config_path, "w", encoding="utf-8") as f:
             yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
         
-        # Force re-initialization of engine
+        # Force re-initialisation of engine with new credentials
         from src.notifications.emergency_engine import from_config
         st.session_state.emergency_engine = from_config(cfg)
-        return True
+        
+        if auto_enable:
+            return True, "Configuration saved. Email alerts ENABLED."
+        else:
+            missing = []
+            if not smtp_sender.strip(): missing.append("Sender Email")
+            if not smtp_password: missing.append("App Password")
+            if not email.strip(): missing.append("Recipient Email")
+            return True, f"Saved (email disabled — missing: {', '.join(missing)})."
     except Exception as e:
-        print(f"Error saving config: {e}")
-        return False
+        return False, f"Error saving config: {e}"
 
 # ─────────────────────────────────────────────────
 # MODEL LOADING
@@ -613,7 +668,7 @@ def render_sidebar():
             key="ec_phone_input"
         )
         ec_email_val = st.text_input(
-            "Email Address",
+            "Recipient Email (Alerts sent here)",
             value=st.session_state.get('ec_email', ''),
             placeholder="guardian@example.com",
             key="ec_email_input"
@@ -625,26 +680,70 @@ def render_sidebar():
         if ec_email_val != st.session_state.get('ec_email', ''):
             st.session_state.ec_email = ec_email_val
 
-        if st.button("💾 Save Configuration", use_container_width=True):
-            if _save_emergency_config(ec_name, ec_phone, ec_email_val):
-                st.success("Config saved!")
+    # ── SMTP Email Server ──────────────────────────────────────────────
+    with st.sidebar.expander("\U0001f4e7 Email Server (SMTP)", expanded=True):
+        smtp_sender = st.text_input(
+            "Sender Email (Gmail)",
+            value=st.session_state.get('smtp_sender', ''),
+            placeholder="guardianear@gmail.com",
+            key="smtp_sender_input"
+        )
+        smtp_password = st.text_input(
+            "Gmail App Password",
+            value=st.session_state.get('smtp_password', ''),
+            placeholder="xxxx xxxx xxxx xxxx",
+            type="password",
+            key="smtp_password_input",
+            help="NOT your Gmail password. Go to Gmail → Security → 2FA → App Passwords"
+        )
+        smtp_host = st.text_input(
+            "SMTP Server",
+            value=st.session_state.get('smtp_host', 'smtp.gmail.com'),
+            key="smtp_host_input"
+        )
+        smtp_port = st.number_input(
+            "SMTP Port",
+            value=int(st.session_state.get('smtp_port', 587)),
+            min_value=1, max_value=65535,
+            key="smtp_port_input"
+        )
+        # Update session state
+        st.session_state.smtp_sender = smtp_sender
+        st.session_state.smtp_password = smtp_password
+        st.session_state.smtp_host = smtp_host
+        st.session_state.smtp_port = smtp_port
+
+        if st.button("\U0001f4be Save Configuration", use_container_width=True, key="save_config_btn"):
+            ok, msg = _save_emergency_config(
+                name=ec_name, phone=ec_phone, email=ec_email_val,
+                smtp_sender=smtp_sender, smtp_password=smtp_password,
+                smtp_host=smtp_host, smtp_port=int(smtp_port),
+            )
+            if ok:
+                st.success(msg)
             else:
-                st.error("Failed to save.")
+                st.error(msg)
 
     # ── Alert Channel Status ───────────────────────────────────────────
-    with st.sidebar.expander("\U0001f514 Alert Channels", expanded=True):
+    with st.sidebar.expander("\U0001f514 Alert Channels", expanded=False):
         desktop_on = st.checkbox("\U0001f5a5\ufe0f Desktop Notifications", value=True, key="chk_desktop")
-        email_on = st.checkbox("\U0001f4e7 Email Alerts", value=bool(st.session_state.get('ec_email')), key="chk_email")
+        _email_ready = bool(st.session_state.get('smtp_sender') and st.session_state.get('smtp_password'))
         _contact_ok = bool(st.session_state.get('ec_name') or st.session_state.get('ec_phone'))
         st.markdown(
             f"{'🟢' if desktop_on else '🔴'} Desktop  |  "
-            f"{'🟢' if email_on and st.session_state.get('ec_email') else '🔴'} Email  |  "
+            f"{'🟢' if _email_ready else '🔴'} Email  |  "
             f"{'🟢' if _contact_ok else '🟡'} Contact"
         )
+        if not st.session_state.get('smtp_sender'):
+            st.caption("❌ Missing: Sender Email")
+        if not st.session_state.get('smtp_password'):
+            st.caption("❌ Missing: Gmail App Password")
+        if not st.session_state.get('ec_email'):
+            st.caption("❌ Missing: Recipient Email")
 
-    # ── Test Button ────────────────────────────────────────────────────
+    # ── Test Buttons ────────────────────────────────────────────────────
     _test_result = st.session_state.get('emergency_test_status')
-    if st.sidebar.button("\U0001f9ea Send Test Emergency Alert", key="emergency_test_btn", type="primary"):
+    if st.sidebar.button("\U0001f9ea Send Test Emergency Alert", key="emergency_test_btn", type="primary", use_container_width=True):
         try:
             eng = _get_emergency_engine()
             if eng:
@@ -665,24 +764,35 @@ def render_sidebar():
         st.session_state.emergency_test_status = None
 
     if st.sidebar.button("\U0001f4e7 Send Test Email", key="email_test_btn", use_container_width=True):
-        try:
-            st.session_state.email_success_count = st.session_state.get('email_success_count', 0)
-            st.session_state.email_failure_count = st.session_state.get('email_failure_count', 0)
-            eng = _get_emergency_engine()
-            if eng and eng._email.is_configured():
-                success = eng._email.send_test_email()
-                if success:
-                    st.session_state.email_success_count += 1
-                    st.session_state.last_email_sent = time.strftime("%H:%M:%S")
-                    st.sidebar.success("✅ Test email delivered!")
+        st.session_state.email_success_count = st.session_state.get('email_success_count', 0)
+        st.session_state.email_failure_count = st.session_state.get('email_failure_count', 0)
+        # Validate fields before attempting SMTP
+        _s = st.session_state.get('smtp_sender', '').strip()
+        _p = st.session_state.get('smtp_password', '')
+        _r = st.session_state.get('ec_email', '').strip()
+        if not _s:
+            st.sidebar.error("\u274c Missing Sender Email — fill in Email Server section above.")
+        elif not _p:
+            st.sidebar.error("\u274c Missing App Password — generate one in Gmail \u2192 Security \u2192 App Passwords.")
+        elif not _r:
+            st.sidebar.error("\u274c Missing Recipient Email — fill in Emergency Contact section above.")
+        else:
+            try:
+                eng = _get_emergency_engine()
+                if eng and eng._email.is_configured():
+                    success = eng._email.send_test_email()
+                    if success:
+                        st.session_state.email_success_count += 1
+                        st.session_state.last_email_sent = time.strftime("%H:%M:%S")
+                        st.sidebar.success("\u2705 Test email delivered to " + _r)
+                    else:
+                        st.session_state.email_failure_count += 1
+                        st.sidebar.error("\u274c SMTP Authentication Failed — check App Password is correct.")
                 else:
-                    st.session_state.email_failure_count += 1
-                    st.sidebar.error("❌ Email failed.")
-            else:
-                st.sidebar.error("❌ Email SMTP not configured.")
-        except Exception as _err:
-            st.session_state.email_failure_count += 1
-            st.sidebar.error(f"❌ Error: {str(_err)}")
+                    st.sidebar.error("\u274c Engine not ready. Click Save Configuration first.")
+            except Exception as _err:
+                st.session_state.email_failure_count += 1
+                st.sidebar.error(f"\u274c Error: {str(_err)}")
 
     st.sidebar.divider()
     # Live session statistics
