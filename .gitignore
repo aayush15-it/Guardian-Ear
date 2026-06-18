@@ -1,7 +1,6 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
-*.py[cod]
-*$py.class
+*.py[cod]*$py.class
 
 # Virtual Environment
 guardian_env/
@@ -26,6 +25,7 @@ env/
 # Logs & Database Alerts
 logs/
 alerts/alert_log.csv
+alerts/notification_logs.csv
 *.log
 
 # Large Datasets & Model Weights
@@ -41,3 +41,13 @@ model/X_max.npy
 # OS Files
 .DS_Store
 Thumbs.db
+
+# ── SECURITY: Local secrets — NEVER commit credentials ──────────────────────
+# config.local.yaml holds Gmail App Password and SMTP credentials.
+# config.yaml stays in git but must have empty credential fields.
+configs/config.local.yaml
+*.local.yaml
+.env
+.env.*
+secrets.yaml
+secrets.json

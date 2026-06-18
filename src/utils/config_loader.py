@@ -57,7 +57,24 @@ def _load_config_cached(path: str) -> Dict[str, Any]:
 
     try:
         with open(config_path, "r", encoding="utf-8") as fh:
-            config: Dict[str, Any] = yaml.safe_load(fh)
+            config: Dict[str, Any] = yaml.safe_load(fh) or {}
+            
+        # ── SECURITY: Load and merge local overrides ────────────────────────
+        local_path = config_path.parent / "config.local.yaml"
+        if local_path.exists():
+            logger.info("Found local override config at %s", local_path)
+            with open(local_path, "r", encoding="utf-8") as fh:
+                local_config = yaml.safe_load(fh) or {}
+                
+            # Simple recursive merge
+            def _merge(target, source):
+                for k, v in source.items():
+                    if isinstance(v, dict) and k in target and isinstance(target[k], dict):
+                        _merge(target[k], v)
+                    else:
+                        target[k] = v
+            _merge(config, local_config)
+            
     except yaml.YAMLError as exc:
         logger.error("Failed to parse YAML config: %s", exc)
         raise

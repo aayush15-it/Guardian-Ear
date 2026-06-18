@@ -240,12 +240,14 @@ def _save_emergency_config(
     Returns:
         (success: bool, message: str)
     """
-    config_path = Path("configs/config.yaml")
-    if not config_path.exists():
-        return False, "configs/config.yaml not found."
+    config_path = Path("configs/config.local.yaml")
+    
+    # We always write to local.yaml now, read existing if any
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
+        cfg = {}
+        if config_path.exists():
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
         
         # Ensure emergency dict exists
         if "emergency" not in cfg:
