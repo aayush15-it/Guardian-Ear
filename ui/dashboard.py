@@ -14,6 +14,7 @@ import sys
 import json
 import time
 import warnings
+import yaml
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 
@@ -755,7 +756,6 @@ def render_sidebar():
                 st.session_state.emergency_test_status = {'error': 'Engine not available'}
         except Exception as _err:
             st.session_state.emergency_test_status = {'error': str(_err)}
-        st.rerun()
 
     if _test_result:
         if isinstance(_test_result, dict) and 'error' not in _test_result:
