@@ -895,7 +895,7 @@ def render_sidebar():
 # ─────────────────────────────────────────────────
 # PAGE 1 — LIVE DETECTION
 # ─────────────────────────────────────────────────
-def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="None"):
+def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="None", sb_metrics_placeholder=None):
     """Render the main live detection page."""
     st.markdown("<div class='main-title'>🎧 Guardian Ear</div>", unsafe_allow_html=True)
     st.markdown(
@@ -1468,7 +1468,7 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
 # ─────────────────────────────────────────────────
 # PAGE 1.5 — ♿ ASSISTIVE HEARING MODE
 # ─────────────────────────────────────────────────
-def page_assistive_hearing_mode(model, location, threshold, X_min, X_max, sim_sound="None"):
+def page_assistive_hearing_mode(model, location, threshold, X_min, X_max, sim_sound="None", sb_metrics_placeholder=None):
     """Render the accessibility page for the hearing-impaired."""
     # CRITICAL FIX: bind assessor from session_state — was missing, causing NameError
     assessor = st.session_state.assessor
