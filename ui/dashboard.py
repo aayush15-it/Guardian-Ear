@@ -636,6 +636,42 @@ def plot_features(mel_db, mfcc, chroma, audio, sr):
 # ─────────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────────
+def render_sidebar_metrics(placeholder=None):
+    """Render Live Session Statistics dynamically."""
+    if placeholder is None:
+        return
+        
+    if st.session_state.live_monitoring:
+        elapsed = int(time.time() - st.session_state.get('session_start_time', time.time()))
+        st.session_state.session_elapsed = elapsed
+    else:
+        elapsed = st.session_state.get('session_elapsed', 0)
+
+    h_e, rem_e = divmod(elapsed, 3600)
+    m_e, s_e = divmod(rem_e, 60)
+    
+    _pt = st.session_state.get('session_peak_threat', 0)
+    _src = st.session_state.get('session_peak_source', 'None')
+    _time = st.session_state.get('session_peak_time', '--:--:--')
+    
+    status = st.session_state.get('session_status', 'IDLE')
+    status_icon = "🟢" if status == "ACTIVE" else "🟡" if status == "MONITORING" else "🔴" if status == "ERROR" else "⚪"
+    
+    with placeholder.container():
+        st.markdown(f"**\U0001f552 Session:** `{h_e:02d}:{m_e:02d}:{s_e:02d}`")
+        st.markdown(f"**\U0001f50a Detections:** `{st.session_state.get('session_detection_count', 0)}`")
+        
+        if _pt > 0:
+            st.markdown(f"**\U0001f6a8 Peak Threat:** `{_pt}/100`")
+            st.caption(f"↳ Source: `{_src}` at `{_time}`")
+        else:
+            st.markdown(f"**\U0001f6a8 Peak Threat:** `0/100`")
+
+        st.markdown(f"**Status:** {status_icon} {status}")
+        st.markdown("**Version:** 3.0 Production")
+
+
+
 def render_sidebar():
     """Render the sidebar with navigation and settings."""
     st.sidebar.markdown("## 🎧 Guardian Ear")
