@@ -1210,6 +1210,9 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                         )
                         st.session_state.detector = None
 
+            # Placeholder for diagnostics so it updates in-place without adding new elements
+            diag_placeholder = st.empty()
+
             # Rerun loop
             while st.session_state.live_monitoring:
                 # 1. Fetch data
@@ -1257,8 +1260,38 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                         raw_audio = np.zeros(8820)
 
                 # 2. Live Waveform
-                wave_title.subheader("\U0001f4c8 Live Audio Stream")
+                wave_title.subheader("📈 Live Audio Stream")
                 wave_placeholder.line_chart(raw_audio[::40], height=140)
+
+                # 2.5 Diagnostics Panel
+                if st.session_state.detector:
+                    h = st.session_state.detector.get_system_health()
+                    rms_val = h.get('current_rms', 0.0)
+                    dyn_thresh = h.get('dynamic_threshold', 0.001)
+                    
+                    # Reconstruct gain logic for display
+                    calc_gain = min(0.05 / max(rms_val, 1e-9), 5.0)
+                    post_gain_rms = rms_val * calc_gain
+                    
+                    silence_triggered = rms_val < dyn_thresh
+                    inf_enabled = not silence_triggered and post_gain_rms >= 0.0003
+                    
+                    # We can render this in a temporary st.info or metrics block inside a dedicated placeholder
+                    diag_placeholder.markdown(
+                        f"""
+                        <div style='background-color: #1e1e1e; padding: 10px; border-radius: 5px; margin-bottom: 10px; border-left: 5px solid {"#ff4b4b" if silence_triggered else "#4CAF50"};'>
+                            <b style='color: white;'>Live Surveillance Diagnostics (Temporary)</b><br/>
+                            <code style='color: #a5b4fc;'>Raw RMS:</code> {rms_val:.5f} &nbsp;|&nbsp; 
+                            <code style='color: #a5b4fc;'>Noise Floor:</code> {h.get('noise_floor', 0.0):.5f} &nbsp;|&nbsp; 
+                            <code style='color: #a5b4fc;'>Dynamic Gate:</code> {dyn_thresh:.5f} <br/>
+                            <code style='color: #a5b4fc;'>Applied Gain:</code> {calc_gain:.2f}x &nbsp;|&nbsp; 
+                            <code style='color: #a5b4fc;'>Post-Gain RMS:</code> {post_gain_rms:.5f} <br/>
+                            <code style='color: #a5b4fc;'>Silence Gate Triggered:</code> <b>{'YES (Ignored)' if silence_triggered else 'NO (Processing)'}</b> &nbsp;|&nbsp;
+                            <code style='color: #a5b4fc;'>Inference Enabled:</code> <b>{'YES' if inf_enabled else 'NO'}</b>
+                        </div>
+                        """, 
+                        unsafe_allow_html=True
+                    )
 
                 # 3. System Health Monitor Row
                 if st.session_state.detector:
