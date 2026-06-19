@@ -8,6 +8,17 @@
 audio:
   sample_rate: 22050
   duration: 3                   # seconds per clip
+  input_device: null            # sounddevice index (null = OS default input)
+
+# ─── Live Surveillance Audio Path ─────────────────────
+# Controls microphone capture gates separate from Upload Mode.
+# Measured: laptop speaker → mic often yields RMS 0.0008–0.001, which the
+# OLD dynamic gate (min threshold 0.001) classified as SILENCE.
+live_audio:
+  match_upload_path: true       # true = raw audio to model (no adaptive gain)
+  silence_rms_floor: 0.0001     # absolute RMS below this = SILENCE
+  use_dynamic_silence_gate: false # false = ignore noise_floor × SNR gate
+  log_gate_diagnostics: true    # log gate decisions every inference step
   n_mels: 128                   # mel spectrogram bins
   n_mfcc: 40                    # MFCC coefficients
   n_chroma: 12                  # chroma pitch classes
@@ -115,10 +126,17 @@ threat_engine:
 
 # ─── Real-Time Inference ─────────────────────────────
 inference:
-  confidence_threshold: 0.70    # minimum confidence to process a detection
+  confidence_threshold: 0.50    # minimum confidence to process a detection
   location: "parking_lot"       # default deployment location
   buffer_size: 66150            # sample_rate * duration (22050 * 3)
   step_seconds: 1.0             # overlap step size in seconds
+
+live_audio:
+  match_upload_path: true
+  silence_rms_floor: 0.0001
+  use_dynamic_silence_gate: false
+  log_gate_diagnostics: true
+
 
 # ─── Priority-Based Action Engine ────────────────────
 action_engine:
@@ -201,9 +219,9 @@ telegram:
 #   Higher entropy_threshold     → less strict (fewer unknowns accepted)
 #   Lower  margin_threshold      → reject ambiguous top-2 predictions
 open_set:
-  confidence_threshold: 0.70   # min confidence to accept a prediction (0.0–1.0)
-  entropy_threshold: 1.80      # max Shannon entropy (nats); uniform=log(10)≈2.303
-  margin_threshold: 0.20       # min gap between top-1 and top-2 probability
+  confidence_threshold: 0.50   # min confidence to accept a prediction (0.0–1.0)
+  entropy_threshold: 2.20      # max Shannon entropy (nats); uniform=log(10)≈2.303
+  margin_threshold: 0.10       # min gap between top-1 and top-2 probability
   enabled: true                # set false to disable open-set gating entirely
 
 # ─── Temporal Voting ─────────────────────────────────
@@ -215,7 +233,7 @@ open_set:
 # the same class in at least 3 of the last 5 one-second windows.
 temporal_voting:
   window_size: 5               # rolling window size (number of recent frames)
-  min_votes: 3                 # minimum consistent predictions needed to confirm
+  min_votes: 1                 # minimum consistent predictions needed to confirm
   enabled: true                # set false to escalate on every single frame
 
 # ─── Emergency Notification Engine ───────────────────────────────────────────

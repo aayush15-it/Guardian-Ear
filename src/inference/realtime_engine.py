@@ -113,9 +113,9 @@ class RealTimeDetector:
     # Noise floor estimation: rolling window of N frames
     _NOISE_FLOOR_WINDOW: int = 30
     # Confidence smoothing: average last N predictions
-    _SMOOTH_WINDOW: int = 3
+    _SMOOTH_WINDOW: int = 1
     # Temporal voting: must detect same class N times consecutively to escalate
-    _VOTE_WINDOW: int = 3
+    _VOTE_WINDOW: int = 1
     # Detection history: last N events exposed to dashboard
     _HISTORY_MAXLEN: int = 20
 
@@ -141,6 +141,29 @@ class RealTimeDetector:
         self.confidence_threshold: float = inf_cfg.get('confidence_threshold', 0.60)
         self.location: str = inf_cfg.get('location', 'unknown')
         self.step_seconds: float = inf_cfg.get('step_seconds', 1.0)
+        self.input_device = audio_cfg.get('input_device')
+        vote_cfg = cfg.get('temporal_voting', {})
+        self._VOTE_WINDOW = int(vote_cfg.get('min_votes', self._VOTE_WINDOW))
+
+        live_cfg = cfg.get('live_audio', {})
+        self._match_upload_path: bool = bool(live_cfg.get('match_upload_path', False))
+        self._silence_rms_floor: float = float(live_cfg.get('silence_rms_floor', 0.0001))
+        self._use_dynamic_silence_gate: bool = bool(
+            live_cfg.get('use_dynamic_silence_gate', not self._match_upload_path)
+        )
+        self._log_gate_diagnostics: bool = bool(live_cfg.get('log_gate_diagnostics', False))
+        self._active_device_name: str = 'unknown'
+
+        # Gate diagnostics (exposed via get_system_health)
+        self._gate_counts: Dict[str, int] = {
+            'buffer_wait': 0,
+            'silence_gate': 0,
+            'post_gain_skip': 0,
+            'inference_run': 0,
+            'open_set_reject': 0,
+            'vote_waiting': 0,
+            'alert_fired': 0,
+        }
 
         # ── Ring buffer ─────────────────────────────────────
         buffer_seconds = max(self.duration * 2, 10)
@@ -199,9 +222,12 @@ class RealTimeDetector:
 
         logger.info(
             "RealTimeDetector v3 ready — sr=%d, dur=%ds, step=%.1fs, "
-            "threshold=%.0f%%, location=%s",
+            "threshold=%.0f%%, location=%s, match_upload=%s, "
+            "dynamic_silence_gate=%s, vote_window=%d",
             self.sample_rate, self.duration, self.step_seconds,
             self.confidence_threshold * 100, self.location,
+            self._match_upload_path, self._use_dynamic_silence_gate,
+            self._VOTE_WINDOW,
         )
 
     # ── Model / normalization loading ───────────────────────
@@ -298,13 +324,20 @@ class RealTimeDetector:
 
     def get_system_health(self) -> Dict[str, Any]:
         """Return real-time system health metrics for the dashboard."""
+        dynamic_threshold = max(
+            self._noise_floor * self._SILENCE_SNR_MULTIPLIER, self._ABS_SILENCE_FLOOR,
+        )
         return {
             'chunk_count': self._chunk_count,
             'noise_floor': round(self._noise_floor, 5),
             'current_rms': round(self.current_rms, 5),
-            'dynamic_threshold': round(
-                max(self._noise_floor * self._SILENCE_SNR_MULTIPLIER, self._ABS_SILENCE_FLOOR), 5
-            ),
+            'dynamic_threshold': round(dynamic_threshold, 5),
+            'silence_rms_floor': round(self._silence_rms_floor, 5),
+            'match_upload_path': self._match_upload_path,
+            'use_dynamic_silence_gate': self._use_dynamic_silence_gate,
+            'input_device': self.input_device,
+            'active_device_name': self._active_device_name,
+            'gate_counts': dict(self._gate_counts),
             'buffer_fill': len(self._ring_buffer),
             'buffer_max': self._ring_buffer.maxlen,
             'stream_active': self._stream is not None and self._stream.active,
@@ -433,10 +466,12 @@ class RealTimeDetector:
             try:
                 audio = self._get_latest_audio()
                 if audio is None:
+                    self._gate_counts['buffer_wait'] += 1
                     time.sleep(0.1)
                     continue
 
                 self._chunk_count += 1
+                max_amp = float(np.max(np.abs(audio)))
 
                 # ── Compute RMS and update noise floor ──────
                 rms = float(np.sqrt(np.mean(audio ** 2)))
@@ -452,13 +487,22 @@ class RealTimeDetector:
                     self._noise_floor * self._SILENCE_SNR_MULTIPLIER,
                     self._ABS_SILENCE_FLOOR,
                 )
-                logger.debug(
-                    "Chunk #%d: RMS=%.5f, noise_floor=%.5f, threshold=%.5f",
-                    self._chunk_count, rms, self._noise_floor, dynamic_threshold,
+                silence_threshold = (
+                    dynamic_threshold if self._use_dynamic_silence_gate
+                    else self._silence_rms_floor
                 )
 
+                if self._log_gate_diagnostics:
+                    logger.info(
+                        "LIVE_DIAG chunk=%d rms=%.5f max_amp=%.4f noise_floor=%.5f "
+                        "silence_thresh=%.5f buffer_fill=%d",
+                        self._chunk_count, rms, max_amp, self._noise_floor,
+                        silence_threshold, len(self._ring_buffer),
+                    )
+
                 # ── Silence detection ────────────────────────
-                if rms < dynamic_threshold:
+                if rms < silence_threshold:
+                    self._gate_counts['silence_gate'] += 1
                     self._pred_window.clear()  # reset smoothing on silence
                     with self._pred_lock:
                         self.latest_prediction = {
@@ -472,30 +516,33 @@ class RealTimeDetector:
                             'consecutive': 0,
                             'rms': rms,
                             'noise_floor': self._noise_floor,
+                            'gate': 'silence',
                         }
                     time.sleep(self.step_seconds)
                     continue
 
-                # ── Adaptive gain ─────────────────────────────
-                audio_normalized = self._adaptive_gain(audio)
+                # ── Audio for inference (upload path vs legacy live path) ──
+                gain_factor = 1.0
+                if self._match_upload_path:
+                    audio_normalized = audio
+                else:
+                    raw_rms_pre = rms
+                    if raw_rms_pre > 1e-9:
+                        gain_factor = min(0.05 / raw_rms_pre, 5.0)
+                    audio_normalized = self._adaptive_gain(audio)
 
-                # ── Absolute RMS gate (post-gain) ─────────────
-                # If audio is still below the minimum inference floor even after
-                # gain amplification, treat it as background noise and skip.
-                # This catches sounds like very quiet fan hum or tap water that
-                # survive the dynamic silence threshold but are too quiet for
-                # reliable classification. Without this gate, the model receives
-                # amplified noise and collapses it to the nearest class (dog_bark).
                 post_gain_rms = float(np.sqrt(np.mean(audio_normalized ** 2)))
-                if post_gain_rms < self._MIN_INFERENCE_RMS:
-                    logger.debug(
-                        "Chunk #%d: Skipping — post-gain RMS %.5f below min inference floor %.5f",
-                        self._chunk_count, post_gain_rms, self._MIN_INFERENCE_RMS,
-                    )
+                if not self._match_upload_path and post_gain_rms < self._MIN_INFERENCE_RMS:
+                    self._gate_counts['post_gain_skip'] += 1
+                    if self._log_gate_diagnostics:
+                        logger.info(
+                            "LIVE_DIAG chunk=%d POST_GAIN_SKIP post_rms=%.5f floor=%.5f",
+                            self._chunk_count, post_gain_rms, self._MIN_INFERENCE_RMS,
+                        )
                     time.sleep(self.step_seconds)
                     continue
 
-                # ── Model inference ───────────────────────────
+                self._gate_counts['inference_run'] += 1
                 class_name, confidence, all_probs, mode = self.predict(audio_normalized)
 
                 # ── Open-Set Rejection ────────────────────────
@@ -503,6 +550,7 @@ class RealTimeDetector:
                 if self.osc:
                     osc_result = self.osc.classify(all_probs)
                     if not osc_result['is_known']:
+                        self._gate_counts['open_set_reject'] += 1
                         class_name = 'unknown'
                         confidence = osc_result['confidence']
                         mode = osc_result['sound_mode']
@@ -520,6 +568,7 @@ class RealTimeDetector:
                 # ── Alert generation (only when voted + above threshold) ─
                 alert = None
                 if confidence >= self.confidence_threshold and voted:
+                    self._gate_counts['alert_fired'] += 1
                     alert = self.assessor.generate_alert(
                         sound_class=class_name,
                         confidence=confidence,
@@ -528,6 +577,7 @@ class RealTimeDetector:
                     )
                     self._display_result(class_name, confidence, all_probs, mode, alert)
                 elif confidence >= self.confidence_threshold and not voted:
+                    self._gate_counts['vote_waiting'] += 1
                     logger.info(
                         "Chunk #%d: %s (%.1f%%) — waiting for votes (%d/%d)",
                         self._chunk_count, class_name, confidence * 100,
@@ -575,8 +625,20 @@ class RealTimeDetector:
                         'threat_score': threat_score,
                         'threat_level': threat_level,
                         'osc_result': osc_result,
+                        'max_amp': max_amp,
+                        'gain_factor': round(gain_factor, 3),
+                        'post_gain_rms': round(post_gain_rms, 5),
+                        'gate': 'inference',
                     }
                     self._detection_history.append(event)
+
+                if self._log_gate_diagnostics:
+                    logger.info(
+                        "LIVE_DIAG chunk=%d INFER %s %.1f%% voted=%s consec=%d "
+                        "gain=%.2fx post_rms=%.5f",
+                        self._chunk_count, class_name, confidence * 100,
+                        voted, consecutive, gain_factor, post_gain_rms,
+                    )
 
 
                 time.sleep(self.step_seconds)
@@ -620,15 +682,28 @@ class RealTimeDetector:
 
         self._stop_event.clear()
 
+        try:
+            if self.input_device is not None:
+                dev_info = sd.query_devices(self.input_device)
+            else:
+                dev_info = sd.query_devices(sd.default.device[0])
+            self._active_device_name = str(dev_info.get('name', 'unknown'))
+        except Exception as exc:
+            self._active_device_name = f'error: {exc}'
+
         self._stream = sd.InputStream(
             samplerate=self.sample_rate,
             channels=1,
             dtype='float32',
             blocksize=1024,
+            device=self.input_device,
             callback=self._audio_callback,
         )
         self._stream.start()
-        logger.info("Microphone stream started (blocksize=1024)")
+        logger.info(
+            "Microphone stream started — device=%s (index=%s) blocksize=1024 sr=%d",
+            self._active_device_name, self.input_device, self.sample_rate,
+        )
 
         self._inference_thread = threading.Thread(
             target=self._inference_loop, daemon=True,

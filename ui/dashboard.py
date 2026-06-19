@@ -680,7 +680,7 @@ def render_sidebar():
 
     st.sidebar.subheader("⚙️ Settings")
     location = st.sidebar.selectbox("📍 Location", LOCATIONS)
-    threshold = st.sidebar.slider("🎯 Alert Threshold", 0, 100, 60)
+    threshold = st.sidebar.slider("🎯 Alert Threshold", 0, 100, 50)
 
     st.sidebar.divider()
     st.sidebar.subheader("🔊 Sound Modes")
