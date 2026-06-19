@@ -14,6 +14,7 @@ import sys
 import json
 import time
 import warnings
+import re
 import yaml
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
@@ -177,6 +178,16 @@ if 'session_detection_count' not in st.session_state:
     st.session_state.session_detection_count = 0
 if 'session_peak_threat' not in st.session_state:
     st.session_state.session_peak_threat = 0
+if 'session_peak_source' not in st.session_state:
+    st.session_state.session_peak_source = "None"
+if 'session_peak_time' not in st.session_state:
+    st.session_state.session_peak_time = "--:--:--"
+if 'session_status' not in st.session_state:
+    st.session_state.session_status = "IDLE"
+if 'last_detected_class' not in st.session_state:
+    st.session_state.last_detected_class = None
+if 'last_detected_time' not in st.session_state:
+    st.session_state.last_detected_time = 0.0
 if 'emergency_test_status' not in st.session_state:
     st.session_state.emergency_test_status = None
 if 'notification_log' not in st.session_state:
@@ -339,6 +350,25 @@ def process_priority_actions(sound_class: str, confidence: float, threat_score: 
     """
     if sound_class in ('silence', '', None, 'unknown'):
         return None
+
+    # ── Live Metrics Tracking ──────────────────────────────────────────────────
+    current_time = time.time()
+    last_class = st.session_state.get('last_detected_class')
+    last_time = st.session_state.get('last_detected_time', 0.0)
+
+    # Detection Debouncing: Increment if new class OR if same class but > 3s cooldown
+    if sound_class != last_class or (current_time - last_time > 3.0):
+        st.session_state.session_detection_count = st.session_state.get('session_detection_count', 0) + 1
+
+    st.session_state.last_detected_class = sound_class
+    st.session_state.last_detected_time = current_time
+
+    # Peak Threat Tracking
+    if threat_score > st.session_state.get('session_peak_threat', 0):
+        st.session_state.session_peak_threat = threat_score
+        st.session_state.session_peak_source = sound_class.replace('_', ' ').title()
+        st.session_state.session_peak_time = time.strftime('%H:%M:%S')
+    # ───────────────────────────────────────────────────────────────────────────
 
     action_type = "Log Only"
     details = ""
@@ -711,15 +741,39 @@ def render_sidebar():
         st.session_state.smtp_port = smtp_port
 
         if st.button("\U0001f4be Save Configuration", use_container_width=True, key="save_config_btn"):
-            ok, msg = _save_emergency_config(
-                name=ec_name, phone=ec_phone, email=ec_email_val,
-                smtp_sender=smtp_sender, smtp_password=smtp_password,
-                smtp_host=smtp_host, smtp_port=int(smtp_port),
-            )
-            if ok:
-                st.success(msg)
+            # ── Validation ──
+            errors = []
+            if not ec_phone.strip():
+                errors.append("Phone Number cannot be empty.")
+            elif not re.match(r"^\d{10}$", ec_phone.strip()):
+                errors.append("Phone number must contain exactly 10 digits.")
+            
+            if ec_email_val.strip() and not re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", ec_email_val.strip()):
+                errors.append("Enter a valid recipient email address.")
+            
+            if smtp_sender.strip() and not smtp_sender.strip().lower().endswith("@gmail.com"):
+                errors.append("Sender Email must be a valid Gmail address.")
+            
+            try:
+                p = int(smtp_port)
+                if not (1 <= p <= 65535):
+                    errors.append("SMTP Port must be between 1 and 65535.")
+            except ValueError:
+                errors.append("SMTP Port must be an integer.")
+
+            if errors:
+                for err in errors:
+                    st.error(f"❌ {err}")
             else:
-                st.error(msg)
+                ok, msg = _save_emergency_config(
+                    name=ec_name, phone=ec_phone, email=ec_email_val,
+                    smtp_sender=smtp_sender, smtp_password=smtp_password,
+                    smtp_host=smtp_host, smtp_port=int(smtp_port),
+                )
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
 
     # ── Alert Channel Status ───────────────────────────────────────────
     with st.sidebar.expander("\U0001f514 Alert Channels", expanded=False):
@@ -792,19 +846,13 @@ def render_sidebar():
 
     st.sidebar.divider()
     # Live session statistics
-    elapsed = int(time.time() - st.session_state.get('session_start_time', time.time()))
-    h_e, rem_e = divmod(elapsed, 3600)
-    m_e, s_e = divmod(rem_e, 60)
-    st.sidebar.markdown(f"**\U0001f552 Session:** `{h_e:02d}:{m_e:02d}:{s_e:02d}`")
-    st.sidebar.markdown(f"**\U0001f50a Detections:** `{st.session_state.get('session_detection_count', 0)}`")
-    st.sidebar.markdown(f"**\U0001f6a8 Peak Threat:** `{st.session_state.get('session_peak_threat', 0)}/100`")
-    st.sidebar.markdown("**Status:** \U0001f7e2 ACTIVE")
-    st.sidebar.markdown("**Version:** 3.0 Production")
+    sb_metrics_placeholder = st.sidebar.empty()
+    render_sidebar_metrics(sb_metrics_placeholder)
 
     # Set location override in state for the background Notification Engine
     st.session_state.location_override = location
 
-    return location, threshold, page, sim_sound
+    return location, threshold, page, sim_sound, sb_metrics_placeholder
 
 
 
@@ -1068,10 +1116,17 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
         if not st.session_state.live_monitoring:
             if st.button("🟢 START LIVE SURVEILLANCE", use_container_width=True):
                 st.session_state.live_monitoring = True
+                st.session_state.session_start_time = time.time()
+                st.session_state.session_status = "ACTIVE"
+                st.session_state.session_detection_count = 0
+                st.session_state.session_peak_threat = 0
+                st.session_state.session_peak_source = "None"
+                st.session_state.session_peak_time = "--:--:--"
                 st.rerun()
         else:
             if st.button("🔴 STOP LIVE SURVEILLANCE", use_container_width=True):
                 st.session_state.live_monitoring = False
+                st.session_state.session_status = "STOPPED"
                 if st.session_state.detector:
                     st.session_state.detector.stop()
                     st.session_state.detector = None
@@ -1100,6 +1155,7 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                         st.session_state.detector = RealTimeDetector(cfg, model=model)
                         st.session_state.detector.start()
                     except Exception as e:
+                        st.session_state.session_status = "ERROR"
                         _full_tb = _tb.format_exc()
                         # Log full traceback to console/log file for debugging
                         import logging as _logging
@@ -1122,8 +1178,9 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
             while st.session_state.live_monitoring:
                 # 1. Fetch data
                 if sim_sound != "None":
+                    st.session_state.session_status = "ACTIVE"
                     sim_map = {
-                        "Gun Shot \U0001f6a8": "gun_shot",
+                        "Gun Shot 🚨": "gun_shot",
                         "Siren \U0001f6a8": "siren",
                         "Child Crying \U0001f476": "child_crying",
                         "Running Tap Water \U0001f6b0": "water_flow",
@@ -1180,6 +1237,12 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                             noise_fl = latest.get('noise_floor', 0.0)
                             voted = latest.get('voted', False)
                             consecutive = latest.get('consecutive', 0)
+
+                            # Dynamically update status based on what is heard
+                            if c_name == 'unknown':
+                                st.session_state.session_status = "MONITORING"
+                            elif c_name != 'silence':
+                                st.session_state.session_status = "ACTIVE"
 
                             # Always use threat score from engine if available
                             if c_name == 'silence':
@@ -1362,6 +1425,7 @@ def page_live_detection(model, location, threshold, X_min, X_max, sim_sound="Non
                     with cols_placeholder.container():
                         st.info("\U0001f399\ufe0f Calibrating live audio stream... (~3 seconds for first chunk)")
 
+                render_sidebar_metrics(sb_metrics_placeholder)
                 time.sleep(1.0)
 
 
@@ -1390,10 +1454,17 @@ def page_assistive_hearing_mode(model, location, threshold, X_min, X_max, sim_so
     if not st.session_state.live_monitoring:
         if st.button("🟢 ACTIVATE ASSISTIVE STREAM", use_container_width=True):
             st.session_state.live_monitoring = True
+            st.session_state.session_start_time = time.time()
+            st.session_state.session_status = "ACTIVE"
+            st.session_state.session_detection_count = 0
+            st.session_state.session_peak_threat = 0
+            st.session_state.session_peak_source = "None"
+            st.session_state.session_peak_time = "--:--:--"
             st.rerun()
     else:
         if st.button("🔴 DEACTIVATE ASSISTIVE STREAM", use_container_width=True):
             st.session_state.live_monitoring = False
+            st.session_state.session_status = "STOPPED"
             if st.session_state.detector:
                 st.session_state.detector.stop()
                 st.session_state.detector = None
@@ -1418,6 +1489,7 @@ def page_assistive_hearing_mode(model, location, threshold, X_min, X_max, sim_so
                     st.session_state.detector = RealTimeDetector(cfg, model=model)
                     st.session_state.detector.start()
                 except Exception as e:
+                    st.session_state.session_status = "ERROR"
                     _full_tb = _tb.format_exc()
                     import logging as _logging
                     _logging.getLogger('GuardianEar.dashboard').error(
@@ -1438,6 +1510,7 @@ def page_assistive_hearing_mode(model, location, threshold, X_min, X_max, sim_so
         while st.session_state.live_monitoring:
             # 1. Fetch data
             if sim_sound != "None":
+                st.session_state.session_status = "ACTIVE"
                 sim_map = {
                     "Gun Shot 🚨": "gun_shot",
                     "Siren 🚨": "siren",
@@ -1482,6 +1555,12 @@ def page_assistive_hearing_mode(model, location, threshold, X_min, X_max, sim_so
                 # Classify prediction and compute threat score
                 # SAFETY: silence must ALWAYS short-circuit before calculate_threat_score
                 # ———————————————————————————————————————————
+                # Dynamically update status based on what is heard
+                if c_name == 'unknown':
+                    st.session_state.session_status = "MONITORING"
+                elif c_name != 'silence':
+                    st.session_state.session_status = "ACTIVE"
+
                 # Default safe values — always defined so display never crashes
                 threat_score = 0
                 threat_level = "SAFE"
@@ -1591,6 +1670,7 @@ def page_assistive_hearing_mode(model, location, threshold, X_min, X_max, sim_so
                 with flash_placeholder.container():
                     st.info("Connecting stream... Adjust simulator or make noise to test.")
 
+            render_sidebar_metrics(sb_metrics_placeholder)
             time.sleep(1.0)
 
 
@@ -1963,12 +2043,12 @@ def main():
     """Main application entry point."""
     model = load_model()
     X_min, X_max = load_normalization()
-    location, threshold, page, sim_sound = render_sidebar()
+    location, threshold, page, sim_sound, sb_metrics_placeholder = render_sidebar()
 
     if page == "🏠 Live Detection":
-        page_live_detection(model, location, threshold, X_min, X_max, sim_sound)
+        page_live_detection(model, location, threshold, X_min, X_max, sim_sound, sb_metrics_placeholder)
     elif page == "♿ Assistive Hearing Mode":
-        page_assistive_hearing_mode(model, location, threshold, X_min, X_max, sim_sound)
+        page_assistive_hearing_mode(model, location, threshold, X_min, X_max, sim_sound, sb_metrics_placeholder)
     elif page == "🚨 Emergency Response Center":
         page_emergency_response_center()
     elif page == "📋 Alert History":
