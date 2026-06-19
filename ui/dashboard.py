@@ -194,25 +194,18 @@ if 'open_set_clf' not in st.session_state:
 # ── Hydrate SMTP + Contact settings from config.yaml on first load ────────────
 if 'smtp_sender' not in st.session_state:
     try:
-        import yaml as _yaml
-        _cfg_path = Path("configs/config.yaml")
-        if _cfg_path.exists():
-            _full = _yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
-            _em = _full.get("emergency", {})
-            _ec = _em.get("contacts", [{}])[0] if _em.get("contacts") else {}
-            _email_cfg = _em.get("email", {})
-            st.session_state.smtp_sender = _email_cfg.get("sender_email", "")
-            st.session_state.smtp_password = _email_cfg.get("sender_password", "")
-            st.session_state.smtp_host = _email_cfg.get("smtp_host", "smtp.gmail.com")
-            st.session_state.smtp_port = int(_email_cfg.get("smtp_port", 587))
-            st.session_state.ec_name = _ec.get("name", "")
-            st.session_state.ec_phone = _ec.get("phone", "")
-            st.session_state.ec_email = _ec.get("email", "")
-        else:
-            st.session_state.smtp_sender = ""
-            st.session_state.smtp_password = ""
-            st.session_state.smtp_host = "smtp.gmail.com"
-            st.session_state.smtp_port = 587
+        from src.utils.config_loader import load_config
+        _full = load_config()
+        _em = _full.get("emergency", {})
+        _ec = _em.get("contacts", [{}])[0] if _em.get("contacts") else {}
+        _email_cfg = _em.get("email", {})
+        st.session_state.smtp_sender = _email_cfg.get("sender_email", "")
+        st.session_state.smtp_password = _email_cfg.get("sender_password", "")
+        st.session_state.smtp_host = _email_cfg.get("smtp_host", "smtp.gmail.com")
+        st.session_state.smtp_port = int(_email_cfg.get("smtp_port", 587))
+        st.session_state.ec_name = _ec.get("name", "")
+        st.session_state.ec_phone = _ec.get("phone", "")
+        st.session_state.ec_email = _ec.get("email", "")
     except Exception:
         st.session_state.smtp_sender = ""
         st.session_state.smtp_password = ""
@@ -245,6 +238,7 @@ def _save_emergency_config(
     
     # We always write to local.yaml now, read existing if any
     try:
+        import yaml
         cfg = {}
         if config_path.exists():
             with open(config_path, "r", encoding="utf-8") as f:
